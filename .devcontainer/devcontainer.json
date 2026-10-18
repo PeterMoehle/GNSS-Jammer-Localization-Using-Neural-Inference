@@ -1,0 +1,32 @@
+{
+  "name": "GNSS Jammer Localization",
+
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+
+  "runArgs": [
+    "--env=DISPLAY=${localEnv:DISPLAY}",
+    "--volume=/tmp/.X11-unix:/tmp/.X11-unix:rw"
+  ],
+
+  "containerEnv": {
+    "DISPLAY": "${localEnv:DISPLAY}"
+  },
+
+  "postCreateCommand": "uv sync && uv pip install -e externals/tools/sionna-rt-gui",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "google.colab",
+        "ms-toolsai.jupyter",
+        "charliermarsh.ruff"
+      ]
+    }
+  },
+
+  "remoteUser": "vscode"
+}

@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Editors
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# External third-party repositories
+/externals/
+
+# Local Workspace Data
+/workspace_inputs/
+/workspace_inputs_old/
+/workspace_outputs/
+/cache/
+
+# Research data
+/data/raw/*
+/data/generated/*
+/data/processed/*
+
+# Experiment output
+/outputs/
+/runs/
+/logs/
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# OS
+.DS_Store
+
+# LOCAL
+notes.txt
+/_LOCAL/
