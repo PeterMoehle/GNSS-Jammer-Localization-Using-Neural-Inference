@@ -159,6 +159,29 @@ subprocess.run(
 t_osm = time.perf_counter()
 
 
+# """""""""""""""""
+import xml.etree.ElementTree as ET
+
+bounds = ET.parse(osm_file).getroot().find("bounds")
+
+actual_lat = (
+    float(bounds.get("minlat")) + float(bounds.get("maxlat"))
+) / 2
+
+actual_lon = (
+    float(bounds.get("minlon")) + float(bounds.get("maxlon"))
+) / 2
+
+dx = (actual_lon - lon) * 111_320 * np.cos(np.radians(lat))
+dy = (actual_lat - lat) * 111_320
+
+print(f"Requested center: {lat:.8f}, {lon:.8f}")
+print(f"Scene origin:     {actual_lat:.8f}, {actual_lon:.8f}")
+print(f"Offset:           east={dx:.3f} m, north={dy:.3f} m")
+
+assert np.hypot(dx, dy) < 0.1, "OSM scene origin does not match requested GPS!"
+
+
 # --------------------------------------------------
 # 7. SceneBaker
 #
@@ -322,31 +345,58 @@ print(f"  Total:      {t_save - t0:.2f} s")
 # 12. Pretty render
 # --------------------------------------------------
 
+# --------------------------------------------------
+# 13. Visualization
+# --------------------------------------------------
+
 from sionna.rt import Camera
 
 print("Rendering scene...")
 
-my_cam = Camera(
-    position=[-700, 700, ground_center + 350],
+# Lower oblique angle to reveal terrain relief
+camera = Camera(
+    position=[-1300, -1100, ground_center + 280],
     look_at=[0, 0, ground_center + 20],
-)
-my_cam = Camera(
-    position=[-1500, -1500, ground_center + 1100],
-    look_at=[0, 0, ground_center],
 )
 
 render_file = scene_dir / "scene_pretty.png"
 
 scene.render_to_file(
-    camera=my_cam,
+    camera=camera,
     filename=str(render_file),
-    resolution=[1920, 1080],
-    num_samples=1024,
+    resolution=(1280, 720),
+    num_samples=64,
     fov=60,
     lighting_scale=1.5,
 )
 
-print(f"Render saved: {render_file}")
+print(f"Saved: {render_file}")
+
+import open3d as o3d
+
+terrain_ply = scene_dir / "meshes_python_terrain" / "Plane.ply"
+
+terrain_mesh = o3d.io.read_triangle_mesh(str(terrain_ply))
+terrain_z = np.asarray(terrain_mesh.vertices)[:, 2]
+
+print(f"Terrain mesh vertices: {len(terrain_z)}")
+print(f"Terrain mesh min Z:    {terrain_z.min():.2f} m")
+print(f"Terrain mesh max Z:    {terrain_z.max():.2f} m")
+print(f"Terrain mesh relief:   {np.ptp(terrain_z):.2f} m")
+
+assert np.ptp(terrain_z) > 1.0, "Terrain mesh appears flat!"
+
+top_camera = Camera(
+    position=[0, 0, ground_center + 2500],
+    look_at=[0, 0, ground_center],
+)
+
+scene.render_to_file(
+    camera=top_camera,
+    filename=str(scene_dir / "scene_top.png"),
+    resolution=(1024, 1024),
+    num_samples=32,
+)
 # --------------------------------------------------
 # 13. Cleanup
 # --------------------------------------------------
