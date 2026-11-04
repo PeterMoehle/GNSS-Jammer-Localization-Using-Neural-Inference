@@ -29,6 +29,7 @@ __pycache__/
 /data/raw/*
 /data/generated/*
 /data/processed/*
+/data2
 
 # Experiment output
 /outputs/
