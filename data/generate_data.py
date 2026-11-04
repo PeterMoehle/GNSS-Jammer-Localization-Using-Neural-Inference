@@ -22,8 +22,8 @@ import sionna.rt as rt
 from scipy.ndimage import binary_erosion, label
 from scipy.spatial import cKDTree
 from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
-from tqdm.auto import tqdm
-
+from tqdm import tqdm
+import sys
 
 @dataclass(frozen=True)
 class DataConfig:
@@ -253,7 +253,8 @@ def simulate_links(scene: rt.Scene, positions: np.ndarray, sensors: np.ndarray, 
     start_time = perf_counter()
 
     try:
-        with tqdm(total=calls, desc="Ray tracing") as progress:
+        with tqdm(total=calls, desc=f"Ray tracing ({scene.name if hasattr(scene, 'name') else 'Scene'})", file=sys.stdout, dynamic_ncols=True) as progress:
+            #with tqdm(total=calls, desc="Ray tracing") as progress:
             for e in range(E):
                 for receiver, pos in zip(receivers, sensors[e]):
                     receiver.position = mi.Point3f(*map(float, pos))
@@ -456,5 +457,120 @@ def main(argv=None) -> Path:
     return output
 
 
-if __name__ == "__main__":
-    main()
+import json
+from dataclasses import asdict
+from pathlib import Path
+import h5py
+import numpy as np
+
+def add_measurements_with_mask(links: dict, cfg: DataConfig, rng: np.random.Generator) -> dict:
+    """Computes RSSI values and generates an explicit binary mask array."""
+    gain = links["path_gain_linear"]
+    gain_db = np.full(gain.shape, np.nan, dtype=np.float32)
+    np.log10(gain, where=gain > 0, out=gain_db)
+    gain_db *= 10.0
+
+    rssi = cfg.tx_power_dbm + gain_db
+    if cfg.rssi_noise_std_db > 0:
+        rssi += rng.normal(0, cfg.rssi_noise_std_db, size=gain.shape)
+
+    detected_mask = (np.isfinite(rssi) & (rssi >= cfg.sensitivity_dbm)).astype(np.uint8)
+    rssi_dbm_nan = np.where(detected_mask == 1, rssi, np.nan).astype(np.float32)
+
+    # Optional zero-filled/clamped RSSI for ML models that don't accept NaNs
+    rssi_dbm_clamped = np.where(detected_mask == 1, rssi, cfg.sensitivity_dbm).astype(np.float32)
+
+    return {
+        **links,
+        "path_gain_db": gain_db,
+        "rssi_dbm": rssi_dbm_nan,
+        "rssi_dbm_clamped": rssi_dbm_clamped,
+        "detected_mask": detected_mask,  # Binary 0/1 indicator tensor (E, T, N)
+    }
+
+def generate_multi_scene_dataset(
+    train_scenes: list[str] = ["munich", "florence", "san_francisco"],
+    test_scene: str = "etoile",
+    episodes_per_scene: int = 100,
+    output_dir: str = "data/multi_scene_ds"
+):
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    all_scenes = train_scenes + [test_scene]
+    print(f"Generating datasets for Train Scenes: {train_scenes}")
+    print(f"Generating dataset for Test Scene: {test_scene}")
+
+    for scene_name in all_scenes:
+        split_type = "test" if scene_name == test_scene else "train"
+        print(f"\n--- Processing Scene: {scene_name} ({split_type}) ---")
+
+        cfg = DataConfig(
+            scene_name=scene_name,
+            episodes=episodes_per_scene,
+            output_dir=out_path,
+            output_name=f"{scene_name}_{split_type}.h5",
+            overwrite=True
+        )
+
+        cfg = DataConfig(
+            scene_name=scene_name,
+            frequency_hz=3.5e9,
+            tx_power_dbm=20.0,
+            sensitivity_dbm=-110.0,
+            rssi_noise_std_db=0.0,
+            max_depth=3,
+            samples_per_src=20_000,
+            batch_size=8,
+            roi_center_xy_m=(0.0, 0.0),
+            roi_half_size_m=150.0,
+            grid_resolution_m=3.0,
+            ground_tolerance_m=0.5,
+            erosion_iterations=1,
+            n_sensors=20,
+            sensor_height_m=1.5,
+            jammer_height_m=1.5,
+            sensor_placement="spread",
+            graph_neighbors=3,
+            episodes=episodes_per_scene,
+            n_steps=60,
+            dt_s=1.0,
+            speed_mps=1.5,
+            heading_std_rad=0.25,
+            seed=42,
+            test_fraction=0.2,
+            output_dir=out_path,
+            output_name=f"{scene_name}_{split_type}.h5",
+            overwrite=True,
+            debug=False,
+            chunk_episodes=64,
+            auto_center_roi=True,
+        )
+
+
+        scene, grid = load_environment(cfg)
+        rng_traj = np.random.default_rng(cfg.seed + 1)
+        rng_sens = np.random.default_rng(cfg.seed)
+        rng_meas = np.random.default_rng(cfg.seed + 2)
+        rng_save = np.random.default_rng(cfg.seed + 3)
+
+        positions, velocities = generate_trajectories(grid, cfg, rng_traj)
+        sensors, edges = setup_sensors_per_episode(scene, grid, cfg, rng_sens)
+        links = simulate_links(scene, positions, sensors, cfg)
+
+        measurements = add_measurements_with_mask(links, cfg, rng_meas)
+
+        # Save HDF5 file per scene
+        save_dataset(
+            cfg, grid, sensors, edges, positions, velocities, measurements, rng_save
+        )
+        print(f"Saved: {cfg.output_dir / cfg.output_name}")
+
+if __name__ == "main":
+    #main()
+    # Execute generation
+    generate_multi_scene_dataset(
+        train_scenes=["munich", "florence"],
+        test_scene="etoile",
+        episodes_per_scene=500
+    )
