@@ -24,6 +24,7 @@ from scipy.spatial import cKDTree
 from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
 from tqdm import tqdm
 import sys
+import gc
 
 @dataclass(frozen=True)
 class DataConfig:
@@ -342,6 +343,7 @@ def save_dataset(
 
     perm = rng.permutation(E)
     n_test = min(E - 1, max(1, round(E * cfg.test_fraction))) if E > 1 and cfg.test_fraction > 0 else 0
+    
     datasets = {
         "sensors/positions": sensors,
         "graph/edge_index": edge_index,
@@ -463,8 +465,31 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-def add_measurements_with_mask(links: dict, cfg: DataConfig, rng: np.random.Generator) -> dict:
-    """Computes RSSI values and generates an explicit binary mask array."""
+def compute_wcl_position(sensors: np.ndarray, rssi: np.ndarray, detected: np.ndarray) -> np.ndarray:
+    """ Calc. WCL per Episode and TimeStep """
+    E, T, N = rssi.shape
+    wcl_pos = np.zeros((E, T, 3), dtype=np.float32)
+
+    power_linear = np.where(detected, 10.0 ** (rssi / 10.0), 0.0)
+    total_power = np.sum(power_linear, axis=-1, keepdims=True)  # (E, T, 1)
+
+    # Gewichtung pro Sensor berechnen
+    weights = np.divide(power_linear, total_power, out=np.zeros_like(power_linear), where=total_power > 0)
+
+    # 3D-Schwerpunkt berechnen: sum_i(w_i * sensor_pos_i)
+    wcl_pos = np.sum(weights[..., None] * sensors[:, None, :, :], axis=2)
+
+    # Fallback: Falls in einem Zeitschritt kein Sensor ein Signal empfängt, geometrischen Mittelpunkt nutzen
+    no_detection = (total_power.squeeze(-1) == 0)
+    if np.any(no_detection):
+        geom_center = np.mean(sensors, axis=1)  # (E, 3)
+        wcl_pos[no_detection] = geom_center[no_detection[:, 0]]
+
+    return wcl_pos.astype(np.float32)
+
+def add_measurements_with_mask(links: dict, sensors: np.ndarray, edges: list[np.ndarray], cfg: DataConfig, rng: np.random.Generator) -> dict:
+    """Computes RSSI values and generates an explicit binary mask array, WCL prior and local/timely noise statistics"""
+    E, T, N = links["path_gain_linear"].shape
     gain = links["path_gain_linear"]
     gain_db = np.full(gain.shape, np.nan, dtype=np.float32)
     np.log10(gain, where=gain > 0, out=gain_db)
@@ -476,16 +501,43 @@ def add_measurements_with_mask(links: dict, cfg: DataConfig, rng: np.random.Gene
 
     detected_mask = (np.isfinite(rssi) & (rssi >= cfg.sensitivity_dbm)).astype(np.uint8)
     rssi_dbm_nan = np.where(detected_mask == 1, rssi, np.nan).astype(np.float32)
-
-    # Optional zero-filled/clamped RSSI for ML models that don't accept NaNs
     rssi_dbm_clamped = np.where(detected_mask == 1, rssi, cfg.sensitivity_dbm).astype(np.float32)
+
+    wcl_positions = compute_wcl_position(sensors, rssi_dbm_clamped, detected_mask.astype(bool)) # (E, T, 3)
+    dist_to_wcl = np.linalg.norm(sensors[:, None, :, :] - wcl_positions[:, :, None, :], axis=-1).astype(np.float32) # Euclidean dist to WCL
+
+    rssi_diff_neighbor = np.zeros((E, T, N), dtype=np.float32)
+    
+    for e in range(E):
+        edge_idx = edges[e]
+        if edge_idx.size > 0:
+            src, dst = edge_idx[0], edge_idx[1]
+            neighbor_means = np.zeros((T, N), dtype=np.float32)
+            counts = np.zeros(N, dtype=np.float32)
+            
+            for s, d in zip(src, dst):
+                neighbor_means[:, s] += rssi_dbm_clamped[e, :, d]
+                counts[s] += 1.0
+            
+            counts[counts == 0] = 1.0
+            neighbor_means /= counts
+            rssi_diff_neighbor[e] = rssi_dbm_clamped[e] - neighbor_means
+
+    # Signal-Gradient: Delta RSSI (t) - RSSI (t-1)
+    rssi_time_gradient = np.zeros((E, T, N), dtype=np.float32)
+    rssi_time_gradient[:, 1:, :] = np.diff(rssi_dbm_clamped, axis=1)
 
     return {
         **links,
         "path_gain_db": gain_db,
         "rssi_dbm": rssi_dbm_nan,
         "rssi_dbm_clamped": rssi_dbm_clamped,
-        "detected_mask": detected_mask,  # Binary 0/1 indicator tensor (E, T, N)
+        "detected_mask": detected_mask,
+        # Neue erweiterte Features:
+        "wcl_positions": wcl_positions,
+        "dist_to_wcl": dist_to_wcl, # Sensor-Distance to WCL (E, T, N)
+        "rssi_diff_neighbor": rssi_diff_neighbor,
+        "rssi_time_gradient": rssi_time_gradient,
     }
 
 def generate_multi_scene_dataset(
@@ -501,7 +553,7 @@ def generate_multi_scene_dataset(
     print(f"Generating datasets for Train Scenes: {train_scenes}")
     print(f"Generating dataset for Test Scene: {test_scene}")
 
-    for scene_name in all_scenes:
+    for idx, scene_name in enumerate(all_scenes):
         split_type = "test" if scene_name == test_scene else "train"
         print(f"\n--- Processing Scene: {scene_name} ({split_type}) ---")
 
@@ -537,7 +589,7 @@ def generate_multi_scene_dataset(
             dt_s=1.0,
             speed_mps=1.5,
             heading_std_rad=0.25,
-            seed=42,
+            seed=42 + idx * 100,
             test_fraction=0.2,
             output_dir=out_path,
             output_name=f"{scene_name}_{split_type}.h5",
@@ -566,7 +618,11 @@ def generate_multi_scene_dataset(
         )
         print(f"Saved: {cfg.output_dir / cfg.output_name}")
 
-if __name__ == "main":
+        del scene, grid, positions, velocities, sensors, links, measurements
+        dr.drjit_malloc_trim()  # Frees Dr.Jit memory caches
+        gc.collect()
+
+if __name__ == "__main__":
     #main()
     # Execute generation
     generate_multi_scene_dataset(

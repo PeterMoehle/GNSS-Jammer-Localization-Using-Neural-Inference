@@ -1,27 +1,31 @@
+from pathlib import Path
+from typing import Sequence, Union
+
 import h5py
 import torch
 from torch.utils.data import Dataset
-from torch_geometric.data import Data, Batch
+from torch_geometric.data import Batch, Data
 from torch_geometric.loader import DataLoader
-from pathlib import Path
-from typing import Sequence, Union
 
 
 class SionnaMultiSceneDataset(Dataset):
     """PyTorch Dataset loading Sionna RT multi-scene HDF5 data.
-    
+
     Yields PyTorch Geometric `Data` objects containing graph structure,
-    jammer trajectory ground truth, RSSI measurements, and `detected_mask`.
+    jammer trajectory ground truth, RSSI measurements, engineered WCL & neighborhood
+    features, and `detected_mask`.
     """
 
     def __init__(
         self,
         filepaths: Sequence[Union[str, Path]],
         rssi_key: str = "rssi_dbm_clamped",
+        load_engineered_features: bool = True,
     ):
         super().__init__()
         self.filepaths = [Path(p) for p in filepaths]
         self.rssi_key = rssi_key
+        self.load_engineered_features = load_engineered_features
 
         # Build index mapping global_sample_idx -> (file_idx, episode_idx)
         self.index_map = []
@@ -37,7 +41,7 @@ class SionnaMultiSceneDataset(Dataset):
                 for ep_idx in range(n_episodes):
                     self.index_map.append((f_idx, ep_idx))
 
-        # Lazy file handles dict for safe multi-processing (DataLoader workers)
+        # Lazy file handles dict for multi-processing (DataLoader workers)
         self._h5_files = {}
 
     def _get_h5_handle(self, file_idx: int) -> h5py.File:
@@ -73,24 +77,43 @@ class SionnaMultiSceneDataset(Dataset):
         jammer_pos = torch.from_numpy(h5f["jammer/positions"][ep_idx]).float()  # (T, 3)
         jammer_vel = torch.from_numpy(h5f["jammer/velocities"][ep_idx]).float()  # (T, 3)
 
-        # 3. Load Measurements & Detection Mask
+        # 3. Load Raw Measurements & Detection Mask
         rssi = torch.from_numpy(h5f[f"measurements/{self.rssi_key}"][ep_idx]).float()  # (T, N)
-        detected_mask = torch.from_numpy(h5f["measurements/detected_mask"][ep_idx]).uint8()  # (T, N)
+        detected_mask = torch.from_numpy(h5f["measurements/detected_mask"][ep_idx]).to(torch.uint8)  # (T, N)
         los = torch.from_numpy(h5f["measurements/los"][ep_idx]).bool()  # (T, N)
 
-        # 4. Construct PyG Data Object
+        # 4. Load Engineered Features (WCL & Neighborhood Dynamics)
+        wcl_pos = None
+        dist_to_wcl = None
+        rssi_diff_neighbor = None
+        rssi_time_gradient = None
+
+        if self.load_engineered_features and "measurements/wcl_positions" in h5f:
+            wcl_pos = torch.from_numpy(h5f["measurements/wcl_positions"][ep_idx]).float()  # (T, 3)
+            dist_to_wcl = torch.from_numpy(h5f["measurements/dist_to_wcl"][ep_idx]).float()  # (T, N)
+            rssi_diff_neighbor = torch.from_numpy(h5f["measurements/rssi_diff_neighbor"][ep_idx]).float()  # (T, N)
+            rssi_time_gradient = torch.from_numpy(h5f["measurements/rssi_time_gradient"][ep_idx]).float()  # (T, N)
+
+        # 5. Construct PyG Data Object
         data = Data(
-            x=sensors_pos,                 # Node coordinates (N, 3)
+            x=sensors_pos,                 # Base Node coordinates (N, 3)
             edge_index=edge_index,         # Graph topology (2, E_edges)
-            edge_attr=edge_attr,           # Sensor distance/orientation features (E_edges, 4)
+            edge_attr=edge_attr,           # Edge attributes (E_edges, 4)
             
-            # Temporal Sequence Signals & Target Attributes
+            # Temporal Sequence Signals
             rssi=rssi,                     # Transients (T, N)
             detected_mask=detected_mask,   # Binary 0/1 Mask (T, N)
             los=los,                       # Line-of-sight status (T, N)
             
-            y_pos=jammer_pos,              # Target Jammer Trajectory Positions (T, 3)
-            y_vel=jammer_vel,              # Target Jammer Trajectory Velocity (T, 3)
+            # Engineered Features (if available)
+            wcl_pos=wcl_pos,               # WCL trajectory estimate (T, 3)
+            dist_to_wcl=dist_to_wcl,       # Sensor distance to WCL (T, N)
+            rssi_diff_neighbor=rssi_diff_neighbor, # Local spatial signal contrast (T, N)
+            rssi_time_gradient=rssi_time_gradient, # Temporal signal dynamics (T, N)
+            
+            # Targets
+            y_pos=jammer_pos,              # Ground truth jammer positions (T, 3)
+            y_vel=jammer_vel,              # Ground truth jammer velocity (T, 3)
             
             episode_idx=ep_idx,
             scene_name=h5f.attrs.get("scene_name", "unknown")
@@ -111,27 +134,29 @@ class SionnaMultiSceneDataset(Dataset):
 # ==============================================================================
 if __name__ == "__main__":
     train_files = ["data/sionna_multi_scene/munich_train.h5", "data/sionna_multi_scene/florence_train.h5"]
-    test_files = ["data/sionna_multi_scene/etoile_test.h5"]
 
-    # Instantiate Datasets
+    # Instantiate Dataset
     train_dataset = SionnaMultiSceneDataset(train_files, rssi_key="rssi_dbm_clamped")
-    test_dataset = SionnaMultiSceneDataset(test_files, rssi_key="rssi_dbm_clamped")
-
-    print(f"Total Training Episodes across scenes: {len(train_dataset)}")
-    print(f"Total Test Episodes in held-out scene: {len(test_dataset)}")
-
-    # Create PyG DataLoaders (Handles dynamic graph batching automatically)
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=2)
 
-    # Inspect one batch from the DataLoader
     for batch in train_loader:
-        print("\n--- PyG Batch Inspection ---")
-        print(f"Batch object:               {batch}")
-        print(f"Number of graphs in batch:  {batch.num_graphs}")
-        print(f"Combined Nodes shape (x):   {batch.x.shape} -> (Batch_Size * N, 3)")
-        print(f"Edge Index shape:           {batch.edge_index.shape}")
-        print(f"RSSI shape:                 {batch.rssi.shape} -> (Batch_Size, T, N)")
-        print(f"Detected Mask shape:        {batch.detected_mask.shape} -> (Batch_Size, T, N)")
-        print(f"Target Jammer Pos shape:    {batch.y_pos.shape} -> (Batch_Size, T, 3)")
-        print(f"Overall Batch Detection %: {batch.detected_mask.float().mean() * 100:.2f}%")
+        print("\n--- PyG Batch Inspection with WCL Features ---")
+        print(f"Batch object:                {batch}")
+        print(f"Number of graphs in batch:   {batch.num_graphs}")
+        print(f"Combined Nodes shape (x):    {batch.x.shape} -> (Batch_Size * N, 3)")
+        print(f"RSSI shape:                  {batch.rssi.shape} -> (Batch_Size, T, N)")
+        if hasattr(batch, "wcl_pos") and batch.wcl_pos is not None:
+            print(f"WCL Positions shape:         {batch.wcl_pos.shape} -> (Batch_Size, T, 3)")
+            print(f"Dist to WCL shape:           {batch.dist_to_wcl.shape} -> (Batch_Size, T, N)")
+            print(f"RSSI Neighbor Diff shape:    {batch.rssi_diff_neighbor.shape} -> (Batch_Size, T, N)")
+            print(f"RSSI Time Gradient shape:    {batch.rssi_time_gradient.shape} -> (Batch_Size, T, N)")
+        print(f"Target Jammer Pos shape:     {batch.y_pos.shape} -> (Batch_Size, T, 3)")
         break
+
+    # Recommended GNSS structure:
+    # node_dynamic_features = torch.stack([
+    #     batch.rssi,
+    #     batch.dist_to_wcl,
+    #     batch.rssi_diff_neighbor,
+    #     batch.rssi_time_gradient
+    # ], dim=-1)
