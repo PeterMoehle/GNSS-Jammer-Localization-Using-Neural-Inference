@@ -1,4 +1,19 @@
 Note: Best to first open the repo using the devcontainer as of all the sionna/dr.jit dependencies
+Note: For data creation using google colab:
+>import os, shutil, subprocess
+>
+># Ohne GPU benötigt Dr.Jit das LLVM-Backend (libLLVM)
+>HAS_GPU = shutil.which("nvidia-smi") is not None and subprocess.run(["nvidia-smi"], capture_output=True).returncode == 0
+>if not HAS_GPU and os.getenv("COLAB_RELEASE_TAG"):
+>    subprocess.run("apt-get -qq update && apt-get -qq install -y llvm > /dev/null", shell=True)
+>
+>try:
+>    import sionna.rt
+>except ImportError:
+>    subprocess.run("pip install -q sionna-rt==2.2.0 h5py", shell=True, check=True)
+>    import sionna.rt
+>
+>print("GPU:", HAS_GPU, "| Sionna RT", sionna.rt.__version__)
 
 ---
 
@@ -15,12 +30,12 @@ Note: Best to first open the repo using the devcontainer as of all the sionna/dr
 
 
 ### Data-Pipeline:
-> load_env: Load the selected mitsuba scene; Identify walkable areas --> Note: Will be streets in future; Creates grid for the subregion of interest (ROI); 
-> setup_sensors: Use farthest point sampling (or another method), to place sensors into the scene. Additionally computes the edges, combining k sensors using KNN algorithm
-> generate_trajectories: Initial Jammer position is uniform selected. Facing direction as well. Propagating Jammer Position. Creating trajectory. It tries to keep up its movement direction + adding a bit of noise. Obstacles lead to change of direction. Additionally we add velocity in Jammer State Estimation 
-> simulate_links: Performs Raytracing. Calculates sionna paths between jammer and sensors.
-> add_measurements: Computing sensor measurements based on calculated sionna paths. Such as rssi_dbm.
-> save_dataset
+- load_env: Load the selected mitsuba scene; Identify walkable areas --> Note: Will be streets in future; Creates grid for the subregion of interest (ROI); 
+- setup_sensors: Use farthest point sampling (or another method), to place sensors into the scene. Additionally computes the edges, combining k sensors using KNN algorithm
+- generate_trajectories: Initial Jammer position is uniform selected. Facing direction as well. Propagating Jammer Position. Creating trajectory. It tries to keep up its movement direction + adding a bit of noise. Obstacles lead to change of direction. Additionally we add velocity in Jammer State Estimation 
+- simulate_links: Performs Raytracing. Calculates sionna paths between jammer and sensors.
+- add_measurements: Computing sensor measurements based on calculated sionna paths. Such as rssi_dbm.
+- save_dataset
 
 
 ### Features
