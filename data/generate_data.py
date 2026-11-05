@@ -192,7 +192,11 @@ def setup_sensors_per_episode(scene: rt.Scene, grid: WalkableMap, cfg: DataConfi
 def compute_edge_attributes(sensors: np.ndarray, edges: np.ndarray) -> np.ndarray:
     src, dst = edges
     delta = sensors[dst] - sensors[src]
-    return np.column_stack((delta, np.linalg.norm(delta, axis=1))).astype(np.float32)
+    #return np.column_stack((delta, np.linalg.norm(delta, axis=1))).astype(np.float32)
+    
+    dist = np.linalg.norm(delta, axis=1, keepdims=True)
+    return np.hstack([delta, dist, np.exp(-dist)]).astype(np.float32)
+    
 
 
 def _path_statistics(paths, n_rx: int, batch_size: int):
@@ -385,7 +389,7 @@ def save_dataset(
                 shuffle=True, **({"chunks": chunks} if chunks else {}),
             )
         file["graph/edge_index"].attrs["axes"] = "source_or_target,edge"
-        file["graph/edge_attr"].attrs["columns"] = "dx_m,dy_m,dz_m,distance_m"
+        file["graph/edge_attr"].attrs["columns"] = "dx_m,dy_m,dz_m,distance_m,exp_weight"
         file["graph/edge_ptr"].attrs["description"] = "Edges for episode e: edge_ptr[e]:edge_ptr[e+1]"
     return output
 

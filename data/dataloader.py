@@ -71,7 +71,7 @@ class SionnaMultiSceneDataset(Dataset):
 
         edge_attr = torch.from_numpy(
             h5f["graph/edge_attr"][start_edge:end_edge]
-        ).float()  # (E_edges, 4) -> [dx, dy, dz, distance]
+        ).float()  # (E_edges, 5) -> [dx, dy, dz, distance, exp_weighted]
 
         # 2. Load Trajectory Ground Truth
         jammer_pos = torch.from_numpy(h5f["jammer/positions"][ep_idx]).float()  # (T, 3)

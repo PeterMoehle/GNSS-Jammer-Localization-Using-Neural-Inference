@@ -5,9 +5,9 @@ Note: Best to first open the repo using the devcontainer as of all the sionna/dr
 ## Goal: Create the data. Simpler pipeline than in 'scripts_data'. Using only predefined scenes.
 
 ### Todo:
-- Weights of Nodes should eventually be adjusted - using Gaussian Distance Weights to discount weight based on physical distance
+- Create supernode out of wcl information (prob in dataloader) and integrate it into the node structure
 - Angles that have been used in baseline paper: $[\sin\theta, \cos\theta, \sin\phi, \cos\phi]$
-- Improve pipeline - using OSM-To-Sionna and street information as walkable area
+- Improve pipeline - using OSM-To-Sionna and street information as walkable area --> scripts_data
 
 ---
 
