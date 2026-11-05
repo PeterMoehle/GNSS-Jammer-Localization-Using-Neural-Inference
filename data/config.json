@@ -1,0 +1,19 @@
+{
+  "scene_name": "etoile",
+  "episodes": 100,
+  "n_steps": 60,
+  "n_sensors": 20,
+  "sensor_placement": "spread",
+  "graph_neighbors": 3,
+  "frequency_hz": 3500000000.0,
+  "tx_power_dbm": 20.0,
+  "max_depth": 3,
+  "samples_per_src": 20000,
+  "batch_size": 8,
+  "seed": 42,
+  "test_fraction": 0.2,
+  "chunk_episodes": 16,
+  "output_dir": "datasets",
+  "output_name": "etoile_100ep.h5",
+  "overwrite": false
+}
