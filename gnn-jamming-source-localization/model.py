@@ -2,6 +2,7 @@ import warnings
 from types import NoneType
 
 import torch
+from global_config import global_config
 from torch import nn
 from torch.nn import Linear
 from torch_geometric.graphgym import init_weights
@@ -13,8 +14,6 @@ from torch_geometric.nn import (
     AttentionalAggregation,
     global_max_pool,
 )
-
-from global_config import global_config
 
 warnings.filterwarnings('ignore', category=UserWarning)
 

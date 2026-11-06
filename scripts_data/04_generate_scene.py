@@ -26,7 +26,6 @@ for path in [
 
 import scenebaker
 
-
 INPUT_DIR = ROOT_DIR / "workspace_inputs"
 DATASET_DIR = ROOT_DIR / "workspace_outputs" / "dataset"
 

@@ -5,7 +5,6 @@ import pickle
 
 import psutil
 import torch
-
 from custom_logging import setup_logging
 from data_processing import create_data_loader, load_data
 from global_config import global_config

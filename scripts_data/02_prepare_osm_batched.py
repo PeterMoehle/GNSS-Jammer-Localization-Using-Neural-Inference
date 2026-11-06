@@ -4,9 +4,8 @@ import argparse
 import json
 import math
 import subprocess
-from pathlib import Path
-
 from collections import defaultdict
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 BATCH_SIZE = 3  # Start conservatively with 12 GB RAM

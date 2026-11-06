@@ -3,15 +3,14 @@ import math
 
 import numpy as np
 import torch
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from torch import optim
-from torch.optim.lr_scheduler import OneCycleLR
-from tqdm import tqdm
-
 from custom_logging import setup_logging
 from data_processing import convert_output_eval
 from global_config import global_config
 from model import GNN
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from torch import optim
+from torch.optim.lr_scheduler import OneCycleLR
+from tqdm import tqdm
 from utils import AverageMeter
 
 setup_logging()
