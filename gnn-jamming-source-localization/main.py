@@ -3,7 +3,6 @@ import logging
 import os
 import pickle
 
-from numpy import False_
 import psutil
 import torch
 
