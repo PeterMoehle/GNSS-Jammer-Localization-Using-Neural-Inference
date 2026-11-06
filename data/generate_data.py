@@ -7,6 +7,9 @@ python sionna_dataset.py \
     --output-name experiment_002.h5
 """
 
+from sionna.rt.scene import Scene
+
+
 import argparse
 import json
 from dataclasses import asdict, dataclass, fields
@@ -86,7 +89,7 @@ class WalkableMap:
 
 
 def load_environment(cfg: DataConfig) -> tuple[rt.Scene, WalkableMap]:
-    scene = load_scene(getattr(rt.scene, cfg.scene_name), merge_shapes=True)
+    scene: Scene = load_scene(getattr(rt.scene, cfg.scene_name), merge_shapes=True)
     scene.frequency = cfg.frequency_hz
     scene.tx_array = scene.rx_array = PlanarArray(
         num_rows=1, num_cols=1, pattern="iso", polarization="V"
@@ -328,8 +331,21 @@ def save_dataset(
         raise ValueError("Unexpected sensor or jammer positions shape")
     if velocities.shape != positions.shape or len(edges) != E:
         raise ValueError("Unexpected velocities or number of graphs")
-    if any(np.shape(value) != (E, T, N) for value in measurements.values()):
-        raise ValueError("Measurements must have shape (E, T, N)")
+    for name, value in measurements.items():
+        shape = np.shape(value)
+
+        if shape[:2] != (E, T):
+            raise ValueError(
+                f"Measurement {name!r} must have episode/time dimensions "
+                f"{(E, T)}, got {shape}"
+            )
+
+        expected_last_dim = 3 if name == "wcl_positions" else N
+        if shape[2:] != (expected_last_dim,):
+            raise ValueError(
+                f"Measurement {name!r} has invalid shape {shape}; "
+                f"expected {(E, T, expected_last_dim)}"
+            )
 
     # Store variable-size graphs as a single concatenated edge list.
     edge_arrays = [np.asarray(edge, dtype=np.int64) for edge in edges]
@@ -487,7 +503,11 @@ def compute_wcl_position(sensors: np.ndarray, rssi: np.ndarray, detected: np.nda
     no_detection = (total_power.squeeze(-1) == 0)
     if np.any(no_detection):
         geom_center = np.mean(sensors, axis=1)  # (E, 3)
-        wcl_pos[no_detection] = geom_center[no_detection[:, 0]]
+        wcl_fallback = np.broadcast_to(
+            geom_center[:, None, :],
+            wcl_pos.shape,
+        )
+        wcl_pos[no_detection] = wcl_fallback[no_detection]
 
     return wcl_pos.astype(np.float32)
 
@@ -614,7 +634,7 @@ def generate_multi_scene_dataset(
         sensors, edges = setup_sensors_per_episode(scene, grid, cfg, rng_sens)
         links = simulate_links(scene, positions, sensors, cfg)
 
-        measurements = add_measurements_with_mask(links, cfg, rng_meas)
+        measurements = add_measurements_with_mask(links=links, sensors=sensors, edges=edges,cfg=cfg, rng=rng_meas)
 
         # Save HDF5 file per scene
         save_dataset(
@@ -623,7 +643,7 @@ def generate_multi_scene_dataset(
         print(f"Saved: {cfg.output_dir / cfg.output_name}")
 
         del scene, grid, positions, velocities, sensors, links, measurements
-        dr.drjit_malloc_trim()  # Frees Dr.Jit memory caches
+        dr.flush_malloc_cache()  # Frees Dr.Jit memory caches
         gc.collect()
 
 if __name__ == "__main__":
