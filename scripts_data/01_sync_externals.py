@@ -34,9 +34,9 @@ REPOS = {
 OSM_DIR = ROOT_DIR / "workspace_inputs" / "osm" / "raw"
 
 OSM_DOWNLOADS = {
-    "germany": "https://download.geofabrik.de/europe/germany-latest.osm.pbf",
+#    "germany": "https://download.geofabrik.de/europe/germany-latest.osm.pbf",
 #    "france": "https://download.geofabrik.de/europe/france-latest.osm.pbf", If we want to include triumph de arc
-    "lithuania": "https://download.geofabrik.de/europe/lithuania-latest.osm.pbf",
+#    "lithuania": "https://download.geofabrik.de/europe/lithuania-latest.osm.pbf",
 }
 
 
