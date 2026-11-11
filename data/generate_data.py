@@ -58,7 +58,8 @@ class DataConfig:
     overwrite: bool = False
     debug: bool = False
     chunk_episodes: int = 64
-    auto_center_roi: bool = True
+    #auto_center_roi: bool = True
+    roi_mode: Literal["manual", "auto", "random"] = "auto"
 
 
 @dataclass
@@ -85,7 +86,7 @@ class WalkableMap:
         return np.column_stack((self.x_m[ix], self.y_m[iy]))
 
 
-def load_environment(cfg: DataConfig) -> tuple[rt.Scene, WalkableMap]:
+def load_environment(cfg: DataConfig, rng: np.random.Generator = None) -> tuple[rt.Scene, WalkableMap]:
     scene = load_scene(getattr(rt.scene, cfg.scene_name), merge_shapes=True)
     scene.frequency = cfg.frequency_hz
     scene.tx_array = scene.rx_array = PlanarArray(
@@ -93,10 +94,28 @@ def load_environment(cfg: DataConfig) -> tuple[rt.Scene, WalkableMap]:
     )
 
     bbox = scene.mi_scene.bbox()
-    center = cfg.roi_center_xy_m
-    if cfg.auto_center_roi:
-        center = ((float(bbox.min.x) + float(bbox.max.x)) / 2,
-                  (float(bbox.min.y) + float(bbox.max.y)) / 2)
+    min_x, max_x = float(bbox.min.x), float(bbox.max.x)
+    min_y, max_y = float(bbox.min.y), float(bbox.max.y)
+
+    safe_margin = cfg.roi_half_size_m
+
+    if cfg.roi_mode == "random":
+        if rng is None:
+            raise ValueError("A random number generator (rng) must be provided for random ROI mode.")
+        
+        rx = max(min_x + safe_margin, max_x - safe_margin)
+        ry = max(min_y + safe_margin, max_y - safe_margin)
+        
+        center_x = rng.uniform(min_x + safe_margin, rx) if rx > (min_x + safe_margin) else (min_x + max_x) / 2
+        center_y = rng.uniform(min_y + safe_margin, ry) if ry > (min_y + safe_margin) else (min_y + max_y) / 2
+        center = (center_x, center_y)
+
+    elif cfg.roi_mode == "auto":
+        center = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+        
+    else:  # "manual"
+        center = cfg.roi_center_xy_m
+    
     n = int(np.floor(2 * cfg.roi_half_size_m / cfg.grid_resolution_m))
     if n < 2:
         raise ValueError("ROI too small for grid resolution")
@@ -548,7 +567,8 @@ def generate_multi_scene_dataset(
     train_scenes: list[str] = ["munich", "florence", "san_francisco"],
     test_scene: str = "etoile",
     episodes_per_scene: int = 100,
-    output_dir: str = "data/multi_scene_ds"
+    output_dir: str = "data/multi_scene_ds",
+    roi_mode: Literal["manual", "auto", "random"] = "random"
 ):
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -580,6 +600,7 @@ def generate_multi_scene_dataset(
             batch_size=8,
             roi_center_xy_m=(0.0, 0.0),
             roi_half_size_m=150.0,
+            roi_mode=roi_mode,
             grid_resolution_m=3.0,
             ground_tolerance_m=0.5,
             erosion_iterations=1,
@@ -604,7 +625,9 @@ def generate_multi_scene_dataset(
         )
 
 
-        scene, grid = load_environment(cfg)
+        rng_env = np.random.default_rng(cfg.seed)
+        scene, grid = load_environment(cfg, rng=rng_env)
+        
         rng_traj = np.random.default_rng(cfg.seed + 1)
         rng_sens = np.random.default_rng(cfg.seed)
         rng_meas = np.random.default_rng(cfg.seed + 2)
@@ -632,5 +655,6 @@ if __name__ == "__main__":
     generate_multi_scene_dataset(
         train_scenes=["munich", "florence"],
         test_scene="etoile",
-        episodes_per_scene=500
+        episodes_per_scene=500,
+        roi_mode="random"
     )
