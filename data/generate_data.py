@@ -141,15 +141,72 @@ def load_environment(cfg: DataConfig, rng: np.random.Generator = None) -> tuple[
     return scene, WalkableMap(x_m, y_m, height, components == sizes.argmax(), cfg.grid_resolution_m)
 
 
-def generate_trajectories(grid: WalkableMap, cfg: DataConfig, rng: np.random.Generator):
+def load_scene_only(cfg: DataConfig) -> rt.Scene:
+    scene = load_scene(getattr(rt.scene, cfg.scene_name), merge_shapes=True)
+    scene.frequency = cfg.frequency_hz
+    scene.tx_array = scene.rx_array = PlanarArray(
+        num_rows=1, num_cols=1, pattern="iso", polarization="V"
+    )
+    return scene
+
+def sample_episode_grid(scene: rt.Scene, cfg: DataConfig, rng: np.random.Generator, max_retries: int = 100) -> WalkableMap:
+    bbox = scene.mi_scene.bbox()
+    min_x, max_x = float(bbox.min.x), float(bbox.max.x)
+    min_y, max_y = float(bbox.min.y), float(bbox.max.y)
+    safe_margin = cfg.roi_half_size_m
+    z_top = float(bbox.max.z) + 10.0
+    n = int(np.floor(2 * cfg.roi_half_size_m / cfg.grid_resolution_m))
+    
+    if n < 2:
+        raise ValueError("ROI too small for grid resolution")
+
+    for _ in range(max_retries):
+        if cfg.roi_mode == "random":
+            rx = max(min_x + safe_margin, max_x - safe_margin)
+            ry = max(min_y + safe_margin, max_y - safe_margin)
+            center_x = rng.uniform(min_x + safe_margin, rx) if rx > (min_x + safe_margin) else (min_x + max_x) / 2
+            center_y = rng.uniform(min_y + safe_margin, ry) if ry > (min_y + safe_margin) else (min_y + max_y) / 2
+            center = (center_x, center_y)
+        elif cfg.roi_mode == "auto":
+            center = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+        else:
+            center = cfg.roi_center_xy_m
+
+        offsets = -cfg.roi_half_size_m + (np.arange(n) + 0.5) * cfg.grid_resolution_m
+        x_m, y_m = offsets + center[0], offsets + center[1]
+        xx, yy = np.meshgrid(x_m, y_m)
+
+        origins = mi.Point3f(xx.ravel().astype(np.float32), yy.ravel().astype(np.float32),
+                             np.full(xx.size, z_top, dtype=np.float32))
+        hits = scene.mi_scene.ray_intersect(mi.Ray3f(origins, mi.Vector3f(0, 0, -1)))
+        valid = np.asarray(hits.is_valid().numpy()).reshape(xx.shape)
+        height = np.where(valid, z_top - np.asarray(hits.t.numpy()).reshape(xx.shape), np.nan)
+
+        ground = valid & (np.abs(height - float(bbox.min.z)) <= cfg.ground_tolerance_m)
+        if cfg.erosion_iterations:
+            ground = binary_erosion(ground, iterations=cfg.erosion_iterations)
+        components, count = label(ground)
+        
+        if count > 0:
+            sizes = np.bincount(components.ravel())
+            sizes[0] = 0
+            # Return the largest connected walkable component
+            return WalkableMap(x_m, y_m, height, components == sizes.argmax(), cfg.grid_resolution_m)
+
+    raise ValueError(f"Could not find a valid walkable ground after {max_retries} attempts. Adjust ROI size or constraints.")
+
+
+def generate_trajectories(grids: list[WalkableMap], cfg: DataConfig, rng: np.random.Generator):
     positions = np.empty((cfg.episodes, cfg.n_steps, 3), dtype=np.float32)
-    candidates = grid.candidates()
     step = cfg.speed_mps * cfg.dt_s
     checks = max(3, int(np.ceil(step / (cfg.grid_resolution_m / 2))) + 1)
 
     for e in range(cfg.episodes):
+        grid = grids[e]
+        candidates = grid.candidates()
         xy = candidates[rng.integers(len(candidates))].copy()
         heading = rng.uniform(0, 2 * np.pi)
+        
         for t in range(cfg.n_steps):
             _, z = grid.lookup(xy)
             positions[e, t] = (*xy, z[0] + cfg.jammer_height_m)
@@ -167,6 +224,7 @@ def generate_trajectories(grid: WalkableMap, cfg: DataConfig, rng: np.random.Gen
     velocity = np.zeros_like(positions)
     velocity[:, 1:] = np.diff(positions, axis=1) / cfg.dt_s
     return positions, velocity
+
 
 
 def sample_sensor_layout(grid: WalkableMap, cfg: DataConfig, rng: np.random.Generator):
@@ -199,10 +257,13 @@ def sample_sensor_layout(grid: WalkableMap, cfg: DataConfig, rng: np.random.Gene
     return sensors, edges
 
 
-def setup_sensors_per_episode(scene: rt.Scene, grid: WalkableMap, cfg: DataConfig, rng):
-    layouts = [sample_sensor_layout(grid, cfg, rng) for _ in range(cfg.episodes)]
+def setup_sensors_per_episode(scene: rt.Scene, grids: list[WalkableMap], cfg: DataConfig, rng: np.random.Generator):
+    # Sample layout specific to the individual episode's grid
+    layouts = [sample_sensor_layout(grids[e], cfg, rng) for e in range(cfg.episodes)]
     sensors = np.stack([s for s, _ in layouts])
     edges = [edge for _, edge in layouts]
+    
+    # Initialize the Sionna receivers in the scene (their positions will be updated per batch during RT)
     for i, pos in enumerate(sensors[0]):
         scene.add(Receiver(name=f"sensor_{i:03d}", position=pos.tolist()))
     return sensors, edges
@@ -333,7 +394,7 @@ def output_path(cfg: DataConfig) -> Path:
 
 def save_dataset(
     cfg: DataConfig,
-    grid: WalkableMap,
+    grids: list[WalkableMap],
     sensors: np.ndarray,
     edges: list[np.ndarray],
     positions: np.ndarray,
@@ -347,8 +408,8 @@ def save_dataset(
         raise ValueError("Unexpected sensor or jammer positions shape")
     if velocities.shape != positions.shape or len(edges) != E:
         raise ValueError("Unexpected velocities or number of graphs")
-    if any(np.shape(value) != (E, T, N) for value in measurements.values()):
-        raise ValueError("Measurements must have shape (E, T, N)")
+    #if any(np.shape(value) != (E, T, N) for value in measurements.values()):
+    #    raise ValueError("Measurements must have shape (E, T, N)")
 
     # Store variable-size graphs as a single concatenated edge list.
     edge_arrays = [np.asarray(edge, dtype=np.int64) for edge in edges]
@@ -364,8 +425,13 @@ def save_dataset(
         compute_edge_attributes(sensors[e], edges[e]) for e in range(E)
     ], axis=0)
 
-    perm = rng.permutation(E)
-    n_test = min(E - 1, max(1, round(E * cfg.test_fraction))) if E > 1 and cfg.test_fraction > 0 else 0
+    map_free = np.stack([g.free for g in grids])              # (E, H, W)
+    map_height = np.stack([g.height_m for g in grids])        # (E, H, W)
+    map_x_m = np.stack([g.x_m for g in grids])                # (E, W)
+    map_y_m = np.stack([g.y_m for g in grids])                # (E, H)
+
+    perm = rng.permutation(cfg.episodes)
+    n_test = min(cfg.episodes - 1, max(1, round(cfg.episodes * cfg.test_fraction))) if cfg.episodes > 1 and cfg.test_fraction > 0 else 0
     
     datasets = {
         "sensors/positions": sensors,
@@ -376,10 +442,10 @@ def save_dataset(
         "jammer/velocities": velocities,
         "jammer/time_s": np.arange(T, dtype=np.float32) * cfg.dt_s,
         **{f"measurements/{name}": data for name, data in measurements.items()},
-        "map/free": grid.free,
-        "map/surface_height_m": grid.height_m,
-        "map/x_m": grid.x_m,
-        "map/y_m": grid.y_m,
+        "map/free": map_free,
+        "map/surface_height_m": map_height,
+        "map/x_m": map_x_m,
+        "map/y_m": map_y_m,
         "split/train_episodes": np.sort(perm[n_test:]),
         "split/test_episodes": np.sort(perm[:n_test]),
     }
@@ -506,7 +572,12 @@ def compute_wcl_position(sensors: np.ndarray, rssi: np.ndarray, detected: np.nda
     no_detection = (total_power.squeeze(-1) == 0)
     if np.any(no_detection):
         geom_center = np.mean(sensors, axis=1)  # (E, 3)
-        wcl_pos[no_detection] = geom_center[no_detection[:, 0]]
+
+        ep_idx, _ = np.nonzero(no_detection)
+        wcl_pos[no_detection] = geom_center[ep_idx]
+
+        return wcl_pos.astype(np.float32)
+
 
     return wcl_pos.astype(np.float32)
 
@@ -621,32 +692,40 @@ def generate_multi_scene_dataset(
             overwrite=True,
             debug=False,
             chunk_episodes=64,
-            auto_center_roi=True,
         )
 
 
         rng_env = np.random.default_rng(cfg.seed)
-        scene, grid = load_environment(cfg, rng=rng_env)
+        scene = load_scene_only(cfg)
+        #scene, grid = load_environment(cfg, rng=rng_env)
+
+        grids = []
+        for _ in range(cfg.episodes):
+            grids.append(sample_episode_grid(scene, cfg, rng_env))
         
         rng_traj = np.random.default_rng(cfg.seed + 1)
         rng_sens = np.random.default_rng(cfg.seed)
         rng_meas = np.random.default_rng(cfg.seed + 2)
         rng_save = np.random.default_rng(cfg.seed + 3)
 
-        positions, velocities = generate_trajectories(grid, cfg, rng_traj)
-        sensors, edges = setup_sensors_per_episode(scene, grid, cfg, rng_sens)
+        #positions, velocities = generate_trajectories(grid, cfg, rng_traj)
+        #sensors, edges = setup_sensors_per_episode(scene, grid, cfg, rng_sens)
+        #links = simulate_links(scene, positions, sensors, cfg)
+        positions, velocities = generate_trajectories(grids, cfg, rng_traj)
+        sensors, edges = setup_sensors_per_episode(scene, grids, cfg, rng_sens)
         links = simulate_links(scene, positions, sensors, cfg)
 
-        measurements = add_measurements_with_mask(links, cfg, rng_meas)
+        #measurements = add_measurements_with_mask(links, cfg, rng_meas)
+        measurements = add_measurements_with_mask(links, sensors, edges, cfg, rng_meas)
 
         # Save HDF5 file per scene
         save_dataset(
-            cfg, grid, sensors, edges, positions, velocities, measurements, rng_save
+            cfg, grids, sensors, edges, positions, velocities, measurements, rng_save
         )
         print(f"Saved: {cfg.output_dir / cfg.output_name}")
 
-        del scene, grid, positions, velocities, sensors, links, measurements
-        dr.drjit_malloc_trim()  # Frees Dr.Jit memory caches
+        del scene, grids, positions, velocities, sensors, links, measurements
+        #dr.drjit_malloc_trim()  # Frees Dr.Jit memory caches
         gc.collect()
 
 if __name__ == "__main__":

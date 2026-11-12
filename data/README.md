@@ -20,6 +20,8 @@ Note: For data creation using google colab:
 ## Goal: Create the data. Simpler pipeline than in 'scripts_data'. Using only predefined scenes.
 
 ### Todo:
+- Currently we can sample a random scene at the beginning. But we need it for each episode. And therefore also store each individual terrain map instead of the one single. (or maybe more performant, we store the whole scene properly in the dataset and store for each entry the roi and then can compute the relevant map on the fly? --> if the data is otherwise to big in size)
+  - "Add_Measurement Bugfix and rnd ROI per Scene per Episode"
 - Create supernode out of wcl information (prob in dataloader) and integrate it into the node structure
 - Angles that have been used in baseline paper: $[\sin\theta, \cos\theta, \sin\phi, \cos\phi]$
 - Improve pipeline - using OSM-To-Sionna and street information as walkable area --> scripts_data
