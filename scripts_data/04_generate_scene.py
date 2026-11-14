@@ -43,8 +43,8 @@ SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 
 sample_id = 0
 
-lat = 48.1374#49.7913
-lon = 11.5755#9.9534
+lat = 49.792996
+lon = 9.937930
 
 osm_region = "germany"
 
