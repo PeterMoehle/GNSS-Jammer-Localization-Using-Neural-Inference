@@ -1,8 +1,18 @@
+from torch._tensor import Tensor
+
+from torch._tensor import Tensor
+
+from torch.nn.modules.dropout import Dropout
+
+from torch.nn.modules.linear import Linear
+
+from torch_geometric.nn.aggr.attention import AttentionalAggregation
+
+
 import warnings
 from types import NoneType
 
 import torch
-from global_config import global_config
 from torch import nn
 from torch.nn import Linear
 from torch_geometric.graphgym import init_weights
@@ -14,9 +24,11 @@ from torch_geometric.nn import (
     AttentionalAggregation,
     global_max_pool,
 )
+from typing import Any
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
+from config import MODEL_ARCHITECTURE_DEFAULTS, TRAINING_DEFAULTS, VAL_TEST_DEFAULTS
 
 class GNN(torch.nn.Module):
     """
@@ -48,10 +60,24 @@ class GNN(torch.nn.Module):
     Methods:
         forward(input): Defines the forward pass of the model using input data.
     """
-    def __init__(self, in_channels: int, dropout_rate: float, num_heads: int, model_type: str, hidden_channels: int, out_channels: int, num_layers: int, act: str='relu', norm: str|NoneType=None, deg=None):
+    def __init__(
+        self, 
+        in_channels: int = MODEL_ARCHITECTURE_DEFAULTS["IN_CHANNELS"], 
+        out_features: int = MODEL_ARCHITECTURE_DEFAULTS["OUT_FEATURES"],
+        dropout_rate: float = MODEL_ARCHITECTURE_DEFAULTS["DROPOUT_RATE"],
+        num_heads: int = MODEL_ARCHITECTURE_DEFAULTS["NUM_HEADS"],
+        model_type: str = MODEL_ARCHITECTURE_DEFAULTS["MODEL_TYPE"],
+        hidden_channels: int = MODEL_ARCHITECTURE_DEFAULTS["HIDDEN_CHANNELS"],
+        out_channels: int = MODEL_ARCHITECTURE_DEFAULTS["OUT_CHANNELS"],
+        num_layers: int = MODEL_ARCHITECTURE_DEFAULTS["NUM_LAYERS"],
+        act: str='relu', 
+        norm: str|NoneType=None, deg=None
+    ):
         super().__init__()
 
         # Model definitions
+        self.gnn: MLP | GCN | GAT | PNA
+
         if model_type == 'MLP':
             self.gnn = MLP(in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels, num_layers=num_layers, dropout=0.0, act=act, norm=norm)
         elif model_type == 'GCN':
@@ -61,87 +87,68 @@ class GNN(torch.nn.Module):
         elif model_type == 'PNA':
             self.gnn = PNA(in_channels=in_channels, hidden_channels=hidden_channels, out_channels=out_channels, num_layers=num_layers,aggregators=['mean', 'max', 'std'], scalers=['identity'], dropout=0.0, act=act, norm=None, deg=deg, jk=None)
 
-        self.attention_pool = AttentionalAggregation(gate_nn=Linear(out_channels, 1))
+        self.attention_pool: AttentionalAggregation = AttentionalAggregation(gate_nn=Linear(out_channels, 1))
         # Linear layer to regress the graph-level features to target outputs
-        self.regressor = Linear(out_channels, global_config.args.out_features)
+        self.regressor: Linear = Linear(in_features=out_channels, out_features=out_features)
 
         # MLP for L_adapt confidence vector output
-        self.weight_layer = nn.Sequential(
+        self.weight_layer: nn.Sequential = nn.Sequential(
             nn.Linear(out_channels, out_channels),
             nn.ReLU(),
             nn.Linear(out_channels, out_channels),
             nn.ReLU(),
-            nn.Linear(out_channels, global_config.args.out_features)
+            nn.Linear(out_channels, out_features)
         )
 
         # Dropout
-        self.dropout = torch.nn.Dropout(dropout_rate)
+        self.dropout: Dropout = torch.nn.Dropout(dropout_rate)
 
         # Initialize weights
         init_weights(self)
 
-    def pooling(self, x, batch):
+    def pooling(self, x, batch) -> Tensor:
         """Apply max pooling method."""
         return global_max_pool(x, batch)
 
     def forward(self, data):
-        """
-        Performs the forward pass of the GNN to predict the jammer's position by combining the GNN-based predictions
-        with a Weighted Centroid Localization (WCL) prior using a learned confidence weight mechanism.
+        # Each snapshot contains one timestep per graph.
+        # PyG batches node-wise fields as [batch_size * num_sensors].
+        node_features = torch.cat(
+            [
+                data.x.float(),                                  # [B*N, 3]
+                data.rssi.float().reshape(-1, 1),                # [B*N, 1]
+                data.detected_mask.float().reshape(-1, 1),       # [B*N, 1]
+                data.dist_to_wcl.float().reshape(-1, 1),         # [B*N, 1]
+                data.rssi_diff_neighbor.float().reshape(-1, 1), # [B*N, 1]
+            ],
+            dim=1,
+        )
 
-        The function processes input data to compute the GNN-based prediction of jammer coordinates and combines it
-        with a WCL-based prediction. This combination is weighted by a confidence vector dynamically learned from
-        supernode features, facilitating an adaptive balance between GNN-derived and domain-informed estimates.
+        if node_features.size(1) != 7:
+            raise RuntimeError(
+                f"Expected 7 node features, got {node_features.shape}"
+            )
 
-        The process involves:
-        - Applying the GNN model (GAT).
-        - Extracting features from supernodes and applying dropout (configurable).
-        - Computing a pooled graph representation for the GNN output excluding supernode.
-        - Calculating the final GNN prediction and the weighted sum with the WCL prediction.
+        x = self.gnn(
+            node_features,
+            data.edge_index,
+            edge_attr=data.edge_attr.float(),
+        )
 
-        Args:
-            data (Data): PyTorch-Geometric data object containing node features (x), edge indices (edge_index),
-                         edge weights (edge_weight), and WCL predictions (wcl_pred).
+        graph_representation = self.pooling(x, data.batch)
 
-        Returns:
-            tuple: Contains three elements:
-                - gnn_prediction (Tensor): The GNN's prediction of the jammer's position.
-                - final_prediction (Tensor): The element-wise weighted sum of the GNN prediction and WCL prior.
-                - weight (Tensor): The learned confidence weights applied to the GNN prediction with sigmoid activation.
-        """
-        x, edge_index, edge_weight, wcl_pred = data.x, data.edge_index, data.edge_weight, data.wcl_pred
-
-        # Handle based on the type of GNN
-        if isinstance(self.gnn, GCN):
-            x = self.gnn(x, edge_index, edge_weight=edge_weight)
-        elif isinstance(self.gnn, GAT):
-            x = self.gnn(x, edge_index, edge_attr=edge_weight)
-        else:
-            x = self.gnn(x, edge_index)
-
-        # Extract supernode features
-        if data.batch is not None:  # Batch of graphs
-            # Get indices of supernodes
-            supernode_indices = torch.cat([torch.where(data.batch == i)[0][-1:] for i in data.batch.unique()])
-            super_node_features = x[supernode_indices]
-
-            # Remove supernodes from x and batch
-            mask = torch.ones(x.size(0), dtype=torch.bool)
-            mask[supernode_indices] = False
-            x = x[mask]
-            batch = data.batch[mask]
-
-        # Apply pooling to get graph representation
-        if batch is not None:  # Batch of graphs
-            graph_representation = self.pooling(x, batch)
-
-        # Compute GNN-based prediction
         gnn_prediction = self.regressor(graph_representation)
 
-        # Compute weight using supernode features
-        weight = torch.sigmoid(self.weight_layer(super_node_features))
+        weight = torch.sigmoid(
+            self.weight_layer(graph_representation)
+        )
 
-        # Compute final prediction as a weighted sum of GNN and WCL results
-        final_prediction = weight * gnn_prediction + (1 - weight) * wcl_pred
+        # Batched graph-level WCL prior and target.
+        wcl_pred = data.wcl_pos.float().reshape(-1, 3)
+
+        final_prediction = (
+            weight * gnn_prediction
+            + (1.0 - weight) * wcl_pred
+        )
 
         return gnn_prediction, final_prediction, weight
