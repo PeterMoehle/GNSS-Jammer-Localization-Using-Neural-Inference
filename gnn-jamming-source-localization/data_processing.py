@@ -186,7 +186,6 @@ class TemporalGraphDataset(Dataset):
         if self.test:
             # Precompute the graphs during dataset initialization for the test set
             self.samples = self.expand_samples()
-            self.precomputed_graphs = [self.precompute_graph(instance) for instance in self.samples]
         else:
             self.samples = [Instance(row) for _, row in data.iterrows()]
 
@@ -281,7 +280,8 @@ class TemporalGraphDataset(Dataset):
         """
         if self.test:
             # Return the precomputed graph for test set
-            return self.precomputed_graphs[idx]
+            instance = self.samples[idx]
+            return self.precompute_graph(instance)
 
         # For non-test set, perform random cropping
         instance = self.samples[idx]
@@ -1184,9 +1184,9 @@ def create_data_loader(train_data, val_data, test_data, experiment_path):
         train_loader, val_loader, test_loader = generate_data_loaders(train_data, val_data, test_data)
 
         # Save data loaders to cache
-        with open(cache_path, 'wb') as f:
-            pickle.dump((train_loader, val_loader, test_loader), f)
-        logging.info("Saved data loaders")
+        # with open(cache_path, 'wb') as f:
+        #     pickle.dump((train_loader, val_loader, test_loader), f)
+        # logging.info("Saved data loaders")
 
     if global_config.args.model == 'PNA':
         deg_histogram = compute_degree_histogram(train_loader)

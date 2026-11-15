@@ -34,7 +34,22 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(description="Training and evaluation.")
 
-    # Model parameters
+    # Model parameters for 2D
+    # parser.add_argument('--model', type=str, default='GAT', help='Model type')
+    # parser.add_argument('--learning_rate', type=float, default=0.0006703373871168542, help='Learning rate')
+    # parser.add_argument('--weight_decay', type=float, default=0.00001, help='Weight decay')
+    # parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+    # parser.add_argument('--test_batch_size', type=int, default=8, help='Test batch size')
+    # parser.add_argument('--dropout_rate', type=float, default=0.0, help='Dropout rate')
+    # parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads')
+    # parser.add_argument('--num_layers', type=int, default=8, help='Number of layers')
+    # parser.add_argument('--hidden_channels', type=int, default=128, help='Hidden channels')
+    # parser.add_argument('--out_channels', type=int, default=128, help='Output channels')
+    # parser.add_argument('--in_channels', type=int, default=13, help='Input channels')
+    # parser.add_argument('--out_features', type=int, default=3, help='Output features')
+    # parser.add_argument('--num_epochs', type=int, default=300, help='Number of epochs')
+
+    # Model Parameters for 3D
     parser.add_argument('--model', type=str, default='GAT', help='Model type')
     parser.add_argument('--learning_rate', type=float, default=0.0006703373871168542, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.00001, help='Weight decay')
@@ -45,12 +60,15 @@ def parse_args():
     parser.add_argument('--num_layers', type=int, default=8, help='Number of layers')
     parser.add_argument('--hidden_channels', type=int, default=128, help='Hidden channels')
     parser.add_argument('--out_channels', type=int, default=128, help='Output channels')
-    parser.add_argument('--in_channels', type=int, default=13, help='Input channels')
-    parser.add_argument('--out_features', type=int, default=3, help='Output features')
-    parser.add_argument('--num_epochs', type=int, default=300, help='Number of epochs')
+    parser.add_argument('--in_channels', type=int, default=22, help='Input channels') # For 3D, in_channels=22; for 2D, in_channels=13
+    parser.add_argument('--out_features', type=int, default=5, help='Output features') # for 2D, out_features=3; for 3D, out_features=5
+    parser.add_argument('--num_epochs', type=int, default=2, help='Number of epochs') 
+
 
     # Data Preprocessing
-    parser.add_argument('--three_dim', type=bool, default=False, help='3D data flag')
+    parser.add_argument('--three_dim', type=bool, default=True, help='3D data flag') 
+
+    
     parser.add_argument('--required_features', nargs='+', default=['node_positions', 'node_noise'], help='Required features')
     parser.add_argument('--additional_features', nargs='+', default=['weighted_centroid_radius', 'weighted_centroid_sin_theta', 'weighted_centroid_cos_theta', 'weighted_centroid_sin_az', 'weighted_centroid_cos_az', 'dist_to_wcl', 'median_noise', 'max_noise', 'noise_differential', 'vector_x', 'vector_y', 'vector_z', 'rate_of_change_signal_strength'], help='Engineered node features')
     parser.add_argument('--num_neighbors', type=int, default=3, help='Number of graph KNN')
@@ -61,10 +79,13 @@ def parse_args():
     parser.add_argument('--aug', nargs='+', default=['drop_node'], help='Graph data augmentation methods')
 
     # Experiments
-    parser.add_argument('--experiments_folder', type=str, default='experiments/', help='Experiments folder')
-    parser.add_argument('--dataset_path', type=str, default='data/pkl/2d_data.pkl', help='Dataset path')
-    parser.add_argument('--dynamic', type=bool, default=False, help='Dynamic flag')
-    parser.add_argument('--inference', type=bool, default=False, help='Inference flag')
+    parser.add_argument('--experiments_folder', type=str, default='results/FirstSuccessfulTraining/', help='Experiments folder')
+
+    parser.add_argument('--dataset_path', type=str, default='data/pkl/3d_data.pkl', help='Dataset path') #2d_data.pkl or 3d_data.pkl
+
+
+    parser.add_argument('--dynamic', type=bool, default=True, help='Dynamic flag') #True for 3D, False for 2D
+    parser.add_argument('--inference', type=bool, default=True, help='Inference flag')
     parser.add_argument('--reproduce', type=bool, default=True, help='Reproduce flag')
     parser.add_argument('--plot_network', type=bool, default=False, help='Plot network flag')
     parser.add_argument('--num_workers', type=int, default=16, help='Number of workers')
@@ -88,7 +109,7 @@ def main():
     - In inference mode, loads a trained model and performs evaluations directly.
     - Aggregates and logs RMSE and MAE statistics for model performance analysis.
     """
-    seeds = [1]
+    seeds = [1, 2, 3]
 
     args = parse_args()
 
@@ -121,6 +142,8 @@ def main():
             # Inference
             if global_config.args.inference:
                 model_path = 'experiments/trained_model_seed1_CAGE_polar_knn3_unit_sphere_1000noise_dynamic.pth'
+                # model_path = 'results/FirstSuccessfulTraining/trained_model_seed1_CAGE_polar_knn3_unit_sphere_1000noise_dynamic.pth'
+                model_path = 'results/FirstSuccessfulTraining/trained_model_seed1_GAT_dynamic.pth'
                 train_dataset, val_dataset, test_dataset = load_data(data_class, global_config.args.experiments_folder)
                 _, _, test_loader, deg_histogram = create_data_loader(train_dataset, val_dataset, test_dataset, global_config.args.experiments_folder)
                 model, optimizer, scheduler, criterion = initialize_model(device, len(test_loader), deg_histogram)
@@ -137,7 +160,7 @@ def main():
                 # Save model predictions
                 save_model_predictions(seed, data_class, predictions, actuals, perc_completion_list, pl_exp_list, sigma_list, jtx_list, num_samples_list, weight_list)
 
-                return predictions
+                # return predictions
             else:
                 # Load the datasets
                 train_dataset, val_dataset, test_dataset = load_data(data_class, global_config.args.experiments_folder)
