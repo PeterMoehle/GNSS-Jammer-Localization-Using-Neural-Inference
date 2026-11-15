@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Sequence, Union
+from typing import Any, Sequence, Union
 
 import h5py
 import torch
@@ -18,24 +18,24 @@ class SionnaMultiSceneDataset(Dataset):
 
     def __init__(
         self,
-        filepaths: Sequence[Union[str, Path]],
+        filepaths: Sequence[str | Path],
         rssi_key: str = "rssi_dbm_clamped",
         load_engineered_features: bool = True,
     ):
         super().__init__()
-        self.filepaths = [Path(p) for p in filepaths]
-        self.rssi_key = rssi_key
-        self.load_engineered_features = load_engineered_features
+        self.filepaths: list[Path] = [Path(p) for p in filepaths]
+        self.rssi_key: str = rssi_key
+        self.load_engineered_features: bool = load_engineered_features
 
         # Build index mapping global_sample_idx -> (file_idx, episode_idx)
-        self.index_map = []
-        self.file_shapes = []
+        self.index_map: list[Any] = []
+        self.file_shapes: list[Any] = []
 
-        for f_idx, path in enumerate(self.filepaths):
+        for f_idx, path in enumerate[Path](self.filepaths):
             with h5py.File(path, "r") as f:
-                n_episodes = f["sensors/positions"].shape[0]
-                n_steps = f["jammer/positions"].shape[1]
-                n_sensors = f["sensors/positions"].shape[1]
+                n_episodes: int = f["sensors/positions"].shape[0]
+                n_steps: int = f["jammer/positions"].shape[1]
+                n_sensors: int = f["sensors/positions"].shape[1]
 
                 self.file_shapes.append((n_episodes, n_steps, n_sensors))
                 for ep_idx in range(n_episodes):
@@ -133,7 +133,7 @@ class SionnaMultiSceneDataset(Dataset):
 # Usage Example & Batching Verification
 # ==============================================================================
 if __name__ == "__main__":
-    train_files = ["data/sionna_multi_scene/munich_train.h5", "data/sionna_multi_scene/florence_train.h5"]
+    train_files = ["data/multi_scene_ds/munich_train.h5", "data/multi_scene_ds/florence_train.h5"]
 
     # Instantiate Dataset
     train_dataset = SionnaMultiSceneDataset(train_files, rssi_key="rssi_dbm_clamped")
@@ -153,6 +153,10 @@ if __name__ == "__main__":
         print(f"Target Jammer Pos shape:     {batch.y_pos.shape} -> (Batch_Size, T, 3)")
         break
 
+    for batch in train_loader:
+        for i in batch:
+            print(i)
+        break
     # Recommended GNSS structure:
     # node_dynamic_features = torch.stack([
     #     batch.rssi,
