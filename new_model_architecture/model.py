@@ -1,20 +1,12 @@
-from torch._tensor import Tensor
-
-from torch._tensor import Tensor
-
-from torch.nn.modules.dropout import Dropout
-
-from torch.nn.modules.linear import Linear
-
-from torch_geometric.nn.aggr.attention import AttentionalAggregation
-
-
 import warnings
 from types import NoneType
 
 import torch
 from torch import nn
+from torch._tensor import Tensor
 from torch.nn import Linear
+from torch.nn.modules.dropout import Dropout
+from torch.nn.modules.linear import Linear
 from torch_geometric.graphgym import init_weights
 from torch_geometric.nn import (
     GAT,
@@ -24,11 +16,12 @@ from torch_geometric.nn import (
     AttentionalAggregation,
     global_max_pool,
 )
-from typing import Any
+from torch_geometric.nn.aggr.attention import AttentionalAggregation
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-from config import MODEL_ARCHITECTURE_DEFAULTS, TRAINING_DEFAULTS, VAL_TEST_DEFAULTS
+from new_model_architecture.config import MODEL_ARCHITECTURE_DEFAULTS
+
 
 class GNN(torch.nn.Module):
     """

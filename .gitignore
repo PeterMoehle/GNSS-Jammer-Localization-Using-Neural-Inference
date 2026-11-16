@@ -54,3 +54,4 @@ __pycache__/
 # LOCAL
 notes.txt
 /_LOCAL/
+new_model_architecture/checkpoints

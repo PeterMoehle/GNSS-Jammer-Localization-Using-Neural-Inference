@@ -38,8 +38,15 @@ def initialize_model(device: torch.device, steps_per_epoch=None, deg_histogram=N
     return model, optimizer, scheduler, criterion
 
 
-def train(model: torch.nn.Module, train_loader: torch.utils.data.DataLoader, optimizer: torch.optim.Optimizer, criterion: torch.nn.Module, device: torch.device, steps_per_epoch: int,
-          scheduler) -> tuple[float, list[dict]]:
+def train(
+        model: torch.nn.Module, 
+        train_loader: torch.utils.data.DataLoader, 
+        optimizer: torch.optim.Optimizer, 
+        criterion: torch.nn.Module, 
+        device: torch.device, 
+        steps_per_epoch: int,
+        scheduler
+    ) -> tuple[float, list[dict]]:
     """
     Trains model tracking loss and epoch training metrics.
 
