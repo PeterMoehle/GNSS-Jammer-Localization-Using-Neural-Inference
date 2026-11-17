@@ -29,7 +29,7 @@ import gc
 @dataclass(frozen=True)
 class DataConfig:
     scene_name: Literal["munich", "etoile", "florence", "san_francisco"] = "etoile"
-    frequency_hz: float = 3.5e9
+    frequency_hz: float = 1.57542e9
     tx_power_dbm: float = 20.0
     sensitivity_dbm: float = -110.0
     rssi_noise_std_db: float = 0.0
@@ -351,7 +351,7 @@ def simulate_links(scene: rt.Scene, positions: np.ndarray, sensors: np.ndarray, 
                     paths = solver(
                         scene, max_depth=cfg.max_depth, samples_per_src=cfg.samples_per_src,
                         synthetic_array=True, los=True, specular_reflection=True,
-                        diffuse_reflection=False, refraction=False, diffraction=False,
+                        diffuse_reflection=False, refraction=False, diffraction=True,
                         seed=cfg.seed + e * T + start,
                     )
                     gain, los, count = _path_statistics(paths, N, B)
@@ -662,7 +662,7 @@ def generate_multi_scene_dataset(
 
         cfg = DataConfig(
             scene_name=scene_name,
-            frequency_hz=3.5e9,
+            frequency_hz=1.57542e9,
             tx_power_dbm=20.0,
             sensitivity_dbm=-110.0,
             rssi_noise_std_db=0.0,
