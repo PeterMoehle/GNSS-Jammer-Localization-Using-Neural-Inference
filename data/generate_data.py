@@ -234,6 +234,16 @@ def sample_sensor_layout(grid: WalkableMap, cfg: DataConfig, rng: np.random.Gene
 
     if cfg.sensor_placement == "random":
         chosen = rng.choice(len(candidates), cfg.n_sensors, replace=False)
+    elif cfg.sensor_placement == "lhs":
+        sampler = qmc.LatinHypercube(d=2, seed=rng)
+        unit_samples = sampler.random(n=cfg.n_sensors)  # (N, 2) in [0, 1]^2
+
+        mins = candidates.min(axis=0)
+        maxs = candidates.max(axis=0)
+        target_xy = mins + unit_samples * (maxs - mins)
+
+        cost_matrix = cdist(target_xy, candidates)
+        _, chosen = linear_sum_assignment(cost_matrix)
     else:
         chosen = [int(rng.integers(len(candidates)))]
         distances = np.sum((candidates - candidates[chosen[0]]) ** 2, axis=1)
