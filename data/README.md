@@ -68,3 +68,44 @@ Note: For data creation using google colab:
 
 ### Features unavailable out of simulation:
 - num_paths / path_gain_linear / path_gain_db
+
+
+---
+## Datasets
+Notes: Within the scenes ROI we should always have a bit of puffer zone for diffraction
+Notes: For Multi Scene Dataset we should sample relative to city size. But capped, otherwise most of the data will just be 2 cities...
+Note: Maybe we have to do the  again and include tags for highway and railway (extract_osm_bbox, so street centerlines, pedestrian zones, and plazas are included...) 
+Note: Extract Building and water polygons from walkable areas so sensors dont spawn there
+Note: We should build a walkable mask for a scene once and then store it as well
+
+1. Single Scene Dataset
+Single Scene - Munich / Berlin; L1 Frequency; Mixture of 3 sensor placements (farthest_spread, lhs, uniform rnd); Jammer routing via street_information; speed fixes 5m/s; SensorPlacement on Streets; ROI_Size 1 km; 5.000 episodes;
+--> Most critical: Num_Sensors. Maybe better to have a range of 10-40 per scene? Should we have them fixed or at random positions?
+--> Test is a set of episodes in the same city
+--> Lets generate and train on 100 sensors and in test we can reduce the amount of sensors and see what is happening if we suddenly retrieve less data
+
+2. Multi Scene Dataset
+
+3. Faster Jammer
+
+4. Different amount of sensors
+
+3. Lithuania - OutOfDistribution Data
+
+
+
+Question: Couldnt we generate within a scene 100 sensors 
+
+
+---
+
+Important Fix:
+Regenerate OSM Prep and Scenebaking (but osm only).
+Reason: We excluded highway information (streets...), but we need them.
+
+Solution:
+- Remove Cached prepared osm: rm -rf workspace_inputs/osm/prepared/germany
+- Download the raw data via uv run sripts_data/01_sync_externals.py --> Comment out line 37 and 38, so it will download germany and lithuania
+- Reexecute osm preperation: uv run sripts_data/02_prepare_osm_batched.py
+- Reexecute scene baking !!! but with flag for osm only... uv run scripts/bake_scenes.py --osm-only
+- Verification: grep -E 'k="(highway|railway)"' workspace_inputs/baked_scenes/<your_city_name>/osm/map.osm | head -n 10

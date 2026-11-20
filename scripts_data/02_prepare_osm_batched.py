@@ -35,15 +35,35 @@ REGIONS = {
 # --------------------------------------------------
 # SceneBaker-relevant OSM tags
 # --------------------------------------------------
+#FILTERS = [
+#    "a/building",
+#    "a/building:part",
+#
+#    "w/highway=primary,primary_link,trunk,trunk_link,"
+#    "secondary,secondary_link,tertiary,tertiary_link,"
+#    "residential,living_street,service,unclassified,"
+#    "track,rest_area,construction,pedestrian,footway,"
+#    "bridleway,cycleway,steps,path",
+#
+#    "a/natural=water,wood,tree,tree_row,shrubbery,heath,grassland,scrub",
+#    "a/water",
+#    "a/landuse=forest,grass,shrubs,flowerbed",
+#    "a/leisure=park,garden,pitch",
+#]
+
 FILTERS = [
     "a/building",
     "a/building:part",
 
-    "w/highway=primary,primary_link,trunk,trunk_link,"
+    "w/highway=motorway,motorway_link,primary,primary_link,trunk,trunk_link,"
     "secondary,secondary_link,tertiary,tertiary_link,"
     "residential,living_street,service,unclassified,"
     "track,rest_area,construction,pedestrian,footway,"
     "bridleway,cycleway,steps,path",
+
+    "a/highway=pedestrian,platform",
+    "w/railway=rail,light_rail,subway,tram,narrow_gauge,monorail,funicular",
+    "a/railway=platform",
 
     "a/natural=water,wood,tree,tree_row,shrubbery,heath,grassland,scrub",
     "a/water",
@@ -51,8 +71,8 @@ FILTERS = [
     "a/leisure=park,garden,pitch",
 ]
 
-SMART_TAGS = "building,building:part,landuse,natural,water,leisure"
-
+#SMART_TAGS = "building,building:part,landuse,natural,water,leisure"
+SMART_TAGS = "building,building:part,landuse,natural,water,leisure,highway,railway"
 
 # --------------------------------------------------
 # Tile-size selection

@@ -152,7 +152,7 @@ def extract_osm_bbox(
             "osmium", "extract",
             "-b", f"{lon_min},{lat_min},{lon_max},{lat_max}",
             "-s", "smart",
-            "-S", "tags=building,building:part,landuse,natural,water,leisure",
+            "-S", "tags=building,building:part,landuse,natural,water,leisure,highway,railway",
             "--set-bounds", str(osm_source),
             "-o", str(out_osm_file),
             "--overwrite",
@@ -307,6 +307,23 @@ def bake_scene(spec: SceneSpec, overwrite: bool = False) -> Path:
     return xml_path
 
 
+def update_osm_only(spec: SceneSpec) -> Path:
+    scene_dir = BAKED_SCENES_DIR / spec.name
+    meta_file = scene_dir / "scene_meta.json"
+    if not meta_file.exists():
+        raise FileNotFoundError(f"Szene '{spec.name}' wurde noch nicht gebacken.")
+
+    lat_min, lat_max, lon_min, lon_max = compute_bbox(
+        spec.lat, spec.lon, spec.range_m, spec.buffer_m
+    )
+    osm_file = scene_dir / "osm" / "map.osm"
+    
+    t0 = time.perf_counter()
+    extract_osm_bbox(lat_min, lat_max, lon_min, lon_max, spec.osm_region, osm_file)
+    print(f"[✓] OSM für '{spec.name}' in {time.perf_counter() - t0:.2f}s aktualisiert.")
+    return osm_file
+
+
 # --------------------------------------------------
 # 5. CLI Entrypoint
 # --------------------------------------------------
@@ -327,6 +344,12 @@ def main():
         default=False,
         help="Re-bake scenes even if scene_meta.json already exists.",
     )
+    parser.add_argument(
+        "--osm-only",
+        action="store_true",
+        default=False,
+        help="Only re-extract map.osm for already baked scenes without re-baking 3D meshes.",
+    )
     args = parser.parse_args()
 
     selected = SCENES_TO_BAKE
@@ -341,7 +364,10 @@ def main():
     print(f"Scenes queued:    {[s.name for s in selected]}")
 
     for spec in selected:
-        bake_scene(spec, overwrite=args.overwrite)
+        if args.osm_only:
+            update_osm_only(spec)
+        else:
+            bake_scene(spec, overwrite=args.overwrite)
 
     print("\nAll requested scenes are baked and ready for Sionna RT.")
 
