@@ -7,7 +7,7 @@ import torch
 from torch_geometric.loader import DataLoader
 from torch_geometric.loader.dataloader import DataLoader
 
-from new_model_architecture.config import TRAINING_DEFAULTS
+from new_model_architecture.settings import settings
 from new_model_architecture.data.dataloader import (
     SionnaMultiSceneDataset,
     SnapshotDataset,
@@ -29,7 +29,7 @@ def _load_dataset(filepaths: list[str |Path])-> SionnaMultiSceneDataset:
 def load_dataloader_v1(
     train_dataset_filepaths: list[str | Path],
     test_dataset_filepaths: list[str | Path],
-    batch_size: int = TRAINING_DEFAULTS["BATCH_SIZE"],
+    batch_size: int = settings.BATCH_SIZE,
     train_val_split: float = 0.8,
     seed: int = 45234,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
@@ -55,19 +55,19 @@ def load_dataloader_v1(
 
     train_dataloader: DataLoader = DataLoader(
         dataset=train_snapshot_dataset,
-        batch_size=TRAINING_DEFAULTS["BATCH_SIZE"],
+        batch_size=settings.BATCH_SIZE,
         shuffle=True,
         num_workers=0,
     )
     val_dataloader: DataLoader = DataLoader(
         dataset=val_snapshot_dataset,
-        batch_size=TRAINING_DEFAULTS["BATCH_SIZE"],
+        batch_size=settings.BATCH_SIZE,
         shuffle=False,
         num_workers=0,
     )
     test_dataloader: DataLoader = DataLoader(
         dataset=test_snapshot_dataset,
-        batch_size=TRAINING_DEFAULTS["BATCH_SIZE"],
+        batch_size=settings.BATCH_SIZE,
         shuffle=False,
         num_workers=0,
     )

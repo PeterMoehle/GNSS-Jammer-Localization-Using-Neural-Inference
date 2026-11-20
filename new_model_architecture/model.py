@@ -20,7 +20,7 @@ from torch_geometric.nn.aggr.attention import AttentionalAggregation
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-from new_model_architecture.config import MODEL_ARCHITECTURE_DEFAULTS
+from new_model_architecture.settings import settings
 
 
 class GNN(torch.nn.Module):
@@ -55,14 +55,14 @@ class GNN(torch.nn.Module):
     """
     def __init__(
         self, 
-        in_channels: int = MODEL_ARCHITECTURE_DEFAULTS["IN_CHANNELS"], 
-        out_features: int = MODEL_ARCHITECTURE_DEFAULTS["OUT_FEATURES"],
-        dropout_rate: float = MODEL_ARCHITECTURE_DEFAULTS["DROPOUT_RATE"],
-        num_heads: int = MODEL_ARCHITECTURE_DEFAULTS["NUM_HEADS"],
-        model_type: str = MODEL_ARCHITECTURE_DEFAULTS["MODEL_TYPE"],
-        hidden_channels: int = MODEL_ARCHITECTURE_DEFAULTS["HIDDEN_CHANNELS"],
-        out_channels: int = MODEL_ARCHITECTURE_DEFAULTS["OUT_CHANNELS"],
-        num_layers: int = MODEL_ARCHITECTURE_DEFAULTS["NUM_LAYERS"],
+        in_channels: int = settings.IN_CHANNELS, 
+        out_features: int = settings.OUT_FEATURES,
+        dropout_rate: float = settings.DROPOUT_RATE,
+        num_heads: int = settings.NUM_HEADS,
+        model_type: str = settings.MODEL_TYPE,
+        hidden_channels: int = settings.HIDDEN_CHANNELS,
+        out_channels: int = settings.OUT_CHANNELS,
+        num_layers: int = settings.NUM_LAYERS,
         act: str='relu', 
         norm: str|NoneType=None, deg=None
     ):
