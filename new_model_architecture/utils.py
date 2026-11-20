@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 
 import torch
-
+import random
 
 class AverageMeter:
     """
@@ -31,7 +31,8 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-def checkpoint_model(model, optimizer, scheduler, epoch, loss, checkpoint_path):
+
+def checkpoint_model(model, optimizer, scheduler, epoch, val_loss, dataset_filepaths, checkpoint_path):
     """
     Save the model checkpoint.
 
@@ -40,15 +41,21 @@ def checkpoint_model(model, optimizer, scheduler, epoch, loss, checkpoint_path):
         optimizer (torch.optim.Optimizer): The optimizer to save.
         scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler to save.
         epoch (int): The current epoch number.
-        loss (float): The current loss value.
+        val_loss (float): The current validation loss value.
+        dataset_filepaths (list): List of dataset file paths used for training.
         checkpoint_path (str): Path to save the checkpoint file.
     """
     torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
-        'loss': loss,
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "loss": val_loss,
+        "dataset_filepaths": dataset_filepaths,
+        "python_random_state": random.getstate(),
+        "torch_random_state": torch.random.get_rng_state(),
+        "cuda_random_state": torch.cuda.get_rng_state_all()
+            if torch.cuda.is_available() else None,
     }, checkpoint_path)
 
 def configure_logging(log_file_path):
@@ -77,6 +84,40 @@ def configure_logging(log_file_path):
     # Add the handlers to the logger
     logger.addHandler(fh)
     logger.addHandler(ch)
+
+def load_checkpoint(
+    checkpoint_path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    device: torch.device
+):
+    """
+    Load the model checkpoint and restore the model, optimizer, and scheduler states.
+    ):
+    Load the model checkpoint.
+
+    Args:
+        checkpoint_path (str): Path to the checkpoint file.
+        model (torch.nn.Module): The model to restore.
+        optimizer (torch.optim.Optimizer): The optimizer to restore.
+        scheduler (torch.optim.lr_scheduler._LRScheduler): The learning rate scheduler to restore.
+
+    Returns:
+        tuple: A tuple containing the restored model, optimizer, scheduler, start epoch, and lowest validation loss.
+    """
+    if not Path(checkpoint_path).exists():
+        raise FileNotFoundError(f"Checkpoint file not found at {checkpoint_path}")
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1
+    lowest_val_loss = checkpoint['loss']
+
+    return checkpoint, model, optimizer, scheduler, start_epoch, lowest_val_loss
+
 
 def set_training_folder(parent_path: Path)-> Path:
     """

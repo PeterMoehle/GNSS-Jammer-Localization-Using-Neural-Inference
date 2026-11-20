@@ -2,8 +2,8 @@
 Makes sure all the settings are loaded and exist. to override values, please make your own config.env file
 """
 
-from pydantic_settings.main import SettingsConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.main import SettingsConfigDict
 
 
 class TrainingSettings(BaseSettings):
@@ -14,6 +14,9 @@ class TrainingSettings(BaseSettings):
     VAL_DISCRITE_COEFF: float = 0.1
     TEST_DISCRITE_COEFF: float = 0.1
     RUN_PATH: str = "runs"
+    CONTINUE_TRAINING: bool = False
+    CHECKPOINT_PATH: str = ""
+    PATIENCE: int = 10
 
 class ModelArchitectureSettings(BaseSettings):
     MODEL_TYPE: str = "GAT"

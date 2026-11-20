@@ -34,17 +34,8 @@ def train_one_epoch(
         optimizer.step()
         scheduler.step()
 
-        loss_meter.update(loss.item(), batch.num_graphs)
+        loss_meter.update(loss.detach(), batch.num_graphs)
 
-        current_lr = optimizer.param_groups[0]["lr"]
-
-        progress_bar.set_postfix(
-            {
-                "Train Loss (MSE)": f"{loss_meter.avg:.4f}",
-                "LR": f"{current_lr:.6f}",
-            }
-        )
-        # TODO: Add calculation of RMSE and Metrics and save them to some kind of logs
     return loss_meter.avg
 
 
@@ -72,11 +63,5 @@ def validate_one_epoch(
             loss = (loss_gnn + loss_final) / 2
 
             loss_meter.update(loss.item(), batch.num_graphs)
-
-            progress_bar.set_postfix(
-                {
-                    "Val Loss (MSE)": f"{loss_meter.avg:.4f}",
-                }
-            )
 
     return loss_meter.avg

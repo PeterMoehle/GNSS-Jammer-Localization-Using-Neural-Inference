@@ -7,12 +7,12 @@ import torch
 from torch_geometric.loader import DataLoader
 from torch_geometric.loader.dataloader import DataLoader
 
-from new_model_architecture.settings import settings
 from new_model_architecture.data.dataloader import (
     SionnaMultiSceneDataset,
     SnapshotDataset,
 )
-
+from new_model_architecture.settings import settings
+import os
 
 def _load_dataset(filepaths: list[str |Path])-> SionnaMultiSceneDataset:
     """
@@ -57,19 +57,20 @@ def load_dataloader_v1(
         dataset=train_snapshot_dataset,
         batch_size=settings.BATCH_SIZE,
         shuffle=True,
-        num_workers=0,
+        num_workers=min(4, os.cpu_count() or 1),
+        pin_memory=torch.cuda.is_available(),
     )
     val_dataloader: DataLoader = DataLoader(
         dataset=val_snapshot_dataset,
         batch_size=settings.BATCH_SIZE,
         shuffle=False,
-        num_workers=0,
+        num_workers=min(4, os.cpu_count() or 1),
+        pin_memory=torch.cuda.is_available(),
     )
     test_dataloader: DataLoader = DataLoader(
         dataset=test_snapshot_dataset,
         batch_size=settings.BATCH_SIZE,
         shuffle=False,
-        num_workers=0,
     )
 
     return train_dataloader, val_dataloader, test_dataloader
