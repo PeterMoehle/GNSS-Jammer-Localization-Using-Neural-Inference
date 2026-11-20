@@ -11,7 +11,6 @@ from torchinfo import summary
 from pathlib import Path
 
 from new_model_architecture.settings import settings
-from new_model_architecture.config import TRAINING_DEFAULTS
 from new_model_architecture.data_preprocessing import load_dataloader_v1
 from new_model_architecture.model import GNN
 from new_model_architecture.train import train_one_epoch, validate_one_epoch
@@ -21,7 +20,6 @@ from new_model_architecture.utils import checkpoint_model, configure_logging, se
 
 
 training_folder: Path = set_training_folder(Path(settings.RUN_PATH)) 
-
 
 
 configure_logging(log_file_path=training_folder / "training.log")
@@ -52,14 +50,14 @@ model = GNN()
 model = model.to(device)
 optimizer = torch.optim.AdamW(
     model.parameters(),
-    lr=TRAINING_DEFAULTS["LEARNING_RATE"],
-    weight_decay=TRAINING_DEFAULTS["WEIGHT_DECAY"],
+    lr=settings.LEARNING_RATE,
+    weight_decay=settings.WEIGHT_DECAY,
 )
 criterion = nn.MSELoss()
 scheduler = OneCycleLR(
     optimizer, 
-    max_lr=TRAINING_DEFAULTS["LEARNING_RATE"], 
-    epochs=TRAINING_DEFAULTS["NUM_EPOCHS"],
+    max_lr=settings.LEARNING_RATE, 
+    epochs=settings.NUM_EPOCHS,
     steps_per_epoch=len(train_dataloader),
     pct_start=0.2, 
     anneal_strategy='linear'
@@ -67,13 +65,13 @@ scheduler = OneCycleLR(
 
 logger.info(summary(model))
 
-logger.info("Training Model...")
-logger.info(f"Epochs: {TRAINING_DEFAULTS['NUM_EPOCHS']}, Batch Size: {TRAINING_DEFAULTS['BATCH_SIZE']}, Learning Rate: {TRAINING_DEFAULTS['LEARNING_RATE']}, Weight Decay: {TRAINING_DEFAULTS['WEIGHT_DECAY']}")
+logger.info("Training Model")
+logger.info(f"Epochs: {settings.NUM_EPOCHS}, Batch Size: {settings.BATCH_SIZE}, Learning Rate: {settings.LEARNING_RATE}, Weight Decay: {settings.WEIGHT_DECAY}")
 
 
 lowest_val_loss = float('inf')
 # Training loop
-for epoch in range(TRAINING_DEFAULTS["NUM_EPOCHS"]):
+for epoch in range(settings.NUM_EPOCHS):
     avg_loss = train_one_epoch(
         model=model,
         train_loader=train_dataloader,
@@ -98,13 +96,10 @@ for epoch in range(TRAINING_DEFAULTS["NUM_EPOCHS"]):
             scheduler=scheduler,
             epoch=epoch,
             loss=val_loss,
-            checkpoint_path="new_model_architecture/checkpoint/best_model.pth"
+            checkpoint_path=training_folder / "best_model.pth"
         )
         logger.info(f"Checkpoint saved at epoch {epoch} with validation loss: {val_loss:.4f}")
-    
 
-    print(f"Epoch {epoch}, Loss: {avg_loss}")
-
-save_model_path = "new_model_architecture/checkpoint/final_model.pth"
+save_model_path = training_folder / "final_model.pth"
 torch.save(model.state_dict(), save_model_path)
-print(f"Model saved to {save_model_path}")
+logger.info(f"Final model saved at: {save_model_path}")

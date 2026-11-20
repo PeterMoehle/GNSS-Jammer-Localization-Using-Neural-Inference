@@ -1,39 +1,10 @@
+"""
+Makes sure all the settings are loaded and exist. to override values, please make your own config.env file
+"""
 
 from pydantic_settings.main import SettingsConfigDict
-
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-"""
-from typing import Any
-
-MODEL_ARCHITECTURE_DEFAULTS: dict[str, Any] = {
-    "MODEL_TYPE": "GAT",
-    "IN_CHANNELS": 7,
-    "OUT_CHANNELS": 128,
-    "HIDDEN_CHANNELS": 128,
-    "NUM_LAYERS": 8,
-    "NUM_HEADS": 4,
-    "OUT_FEATURES": 3,
-    "DROPOUT_RATE": 0.0,
-}
-
-TRAINING_DEFAULTS: dict[str, Any] = {
-    "BATCH_SIZE": 8,
-    "LEARNING_RATE": 0.0006703373871168542,
-    "WEIGHT_DECAY": 0.00001,
-    "NUM_EPOCHS": 50,
-    "VAL_DISCRITE_COEFF": 0.1, #what
-    "TEST_DISCRITE_COEFF": 0.1, #What
-    "RUN_PATH": "runs"
-}
-
-VAL_TEST_DEFAULTS: dict[str, Any] = {
-    "TEST_BATCH_SIZE": 8,
-    "RESUME": False, #For checkpointing
-    "INFERENCE": False, #For inference
-}
-"""
 
 class TrainingSettings(BaseSettings):
     BATCH_SIZE: int = 8
@@ -65,6 +36,6 @@ class Settings(
     ValTestSettings
 ):
     model_config = SettingsConfigDict(env_file="config.env")
-    
+
 
 settings: Settings = Settings()
