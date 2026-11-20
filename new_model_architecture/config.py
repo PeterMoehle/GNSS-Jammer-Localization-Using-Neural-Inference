@@ -15,9 +15,10 @@ TRAINING_DEFAULTS: dict[str, Any] = {
     "BATCH_SIZE": 8,
     "LEARNING_RATE": 0.0006703373871168542,
     "WEIGHT_DECAY": 0.00001,
-    "NUM_EPOCHS": 10,
+    "NUM_EPOCHS": 50,
     "VAL_DISCRITE_COEFF": 0.1, #what
     "TEST_DISCRITE_COEFF": 0.1, #What
+    "RUN_PATH": "runs"
 }
 
 VAL_TEST_DEFAULTS: dict[str, Any] = {

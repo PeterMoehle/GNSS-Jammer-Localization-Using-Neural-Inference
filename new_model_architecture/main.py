@@ -13,12 +13,14 @@ from new_model_architecture.data.dataloader import (
 )
 from new_model_architecture.model import GNN
 from new_model_architecture.train import train_one_epoch, validate_one_epoch
-from new_model_architecture.utils import checkpoint_model
+from new_model_architecture.utils import checkpoint_model, configure_logging
 from torch.optim.lr_scheduler import OneCycleLR
 from torchinfo import summary
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+
+configure_logging("new_model_architecture/logs/training.log")
 
 dataset: SionnaMultiSceneDataset = SionnaMultiSceneDataset(
     filepaths=[
