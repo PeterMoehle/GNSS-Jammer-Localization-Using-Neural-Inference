@@ -2,59 +2,51 @@
 Executes the main training run
 """
 
+import logging
+
 import torch
 from torch import nn
-from torch_geometric.loader import DataLoader
-
-from new_model_architecture.config import TRAINING_DEFAULTS
-from new_model_architecture.data.dataloader import (
-    SionnaMultiSceneDataset,
-    SnapshotDataset,
-)
-from new_model_architecture.model import GNN
-from new_model_architecture.train import train_one_epoch, validate_one_epoch
-from new_model_architecture.utils import checkpoint_model, configure_logging
 from torch.optim.lr_scheduler import OneCycleLR
 from torchinfo import summary
+from pathlib import Path
+
+from new_model_architecture.settings import settings
+from new_model_architecture.config import TRAINING_DEFAULTS
+from new_model_architecture.data_preprocessing import load_dataloader_v1
+from new_model_architecture.model import GNN
+from new_model_architecture.train import train_one_epoch, validate_one_epoch
+from new_model_architecture.utils import checkpoint_model, configure_logging, set_training_folder
+
+
+
+
+training_folder: Path = set_training_folder(Path(settings.RUN_PATH)) 
+
+
+
+configure_logging(log_file_path=training_folder / "training.log")
+
+logger = logging.getLogger(__name__)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+logger.info(f"Using device: {device}")
 
-configure_logging("new_model_architecture/logs/training.log")
+train_dataset_filepaths: list[str | Path] = [
+    "new_model_architecture/data/multi_scene_ds/munich_train.h5",
+    "new_model_architecture/data/multi_scene_ds/florence_train.h5"
+]
+test_dataset_filepaths: list[str | Path] = [
+    "new_model_architecture/data/multi_scene_ds/etoile_test.h5"
+]
 
-dataset: SionnaMultiSceneDataset = SionnaMultiSceneDataset(
-    filepaths=[
-        "new_model_architecture/data/multi_scene_ds/munich_train.h5",
-        "new_model_architecture/data/multi_scene_ds/florence_train.h5"
-    ])
-
-# Split before expanding into snapshots
-train_dataset, val_dataset = torch.utils.data.random_split(
-    dataset,
-    [int(len(dataset) * 0.8), len(dataset) - int(len(dataset) * 0.8)],
-    generator=torch.Generator().manual_seed(42)
+train_dataloader, val_dataloader, test_dataloader = load_dataloader_v1(
+    train_dataset_filepaths=train_dataset_filepaths,
+    test_dataset_filepaths=test_dataset_filepaths
 )
 
-train_snapshot_dataset: SnapshotDataset = SnapshotDataset(train_dataset)
-val_snapshot_dataset: SnapshotDataset = SnapshotDataset(val_dataset)
 
-
-
-train_dataloader = DataLoader(
-    dataset=train_snapshot_dataset,
-    batch_size=TRAINING_DEFAULTS["BATCH_SIZE"],
-    shuffle=True,
-    num_workers=0,
-)
-val_dataloader = DataLoader(
-    dataset=val_snapshot_dataset,
-    batch_size=TRAINING_DEFAULTS["BATCH_SIZE"],
-    shuffle=False,
-    num_workers=0,
-)
-
-print(f"num_batches: {len(train_dataloader)}")
-print(f"num_val_batches: {len(val_dataloader)}")
+logger.info(f"num_batches: {len(train_dataloader)}")
+logger.info(f"num_val_batches: {len(val_dataloader)}")
 
 model = GNN()
 model = model.to(device)
@@ -73,10 +65,10 @@ scheduler = OneCycleLR(
     anneal_strategy='linear'
 )
 
-print(summary(model))
+logger.info(summary(model))
 
-print("Training model...")
-print(f"Epochs: {TRAINING_DEFAULTS['NUM_EPOCHS']}, Batch Size: {TRAINING_DEFAULTS['BATCH_SIZE']}, Learning Rate: {TRAINING_DEFAULTS['LEARNING_RATE']}, Weight Decay: {TRAINING_DEFAULTS['WEIGHT_DECAY']}")
+logger.info("Training Model...")
+logger.info(f"Epochs: {TRAINING_DEFAULTS['NUM_EPOCHS']}, Batch Size: {TRAINING_DEFAULTS['BATCH_SIZE']}, Learning Rate: {TRAINING_DEFAULTS['LEARNING_RATE']}, Weight Decay: {TRAINING_DEFAULTS['WEIGHT_DECAY']}")
 
 
 lowest_val_loss = float('inf')
@@ -97,6 +89,7 @@ for epoch in range(TRAINING_DEFAULTS["NUM_EPOCHS"]):
         device=device
     )
 
+    logger.info(f"Epoch {epoch}, Train Loss: {avg_loss:.4f}, Validation Loss: {val_loss:.4f}")
     if val_loss < lowest_val_loss:
         lowest_val_loss = val_loss
         checkpoint_model(
@@ -107,7 +100,8 @@ for epoch in range(TRAINING_DEFAULTS["NUM_EPOCHS"]):
             loss=val_loss,
             checkpoint_path="new_model_architecture/checkpoint/best_model.pth"
         )
-        print(f"Checkpoint saved at epoch {epoch} with validation loss: {val_loss:.4f}")
+        logger.info(f"Checkpoint saved at epoch {epoch} with validation loss: {val_loss:.4f}")
+    
 
     print(f"Epoch {epoch}, Loss: {avg_loss}")
 

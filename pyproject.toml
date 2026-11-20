@@ -37,6 +37,7 @@ dependencies = [
     "viser>=1.1.1",
     "ipykernel>=7.4.0",
     "torchinfo>=1.8.0",
+    "pydantic-settings>=2.16.3",
 ]
 
 [[tool.uv.index]]

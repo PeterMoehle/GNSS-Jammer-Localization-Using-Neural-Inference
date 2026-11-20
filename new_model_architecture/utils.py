@@ -1,5 +1,9 @@
-import torch
 import logging
+from pathlib import Path
+
+import torch
+
+
 class AverageMeter:
     """
     Class to track average over stream of values for MSE loss during training and testing.
@@ -73,3 +77,26 @@ def configure_logging(log_file_path):
     # Add the handlers to the logger
     logger.addHandler(fh)
     logger.addHandler(ch)
+
+def set_training_folder(parent_path: Path)-> Path:
+    """
+    Create a new training folder with an incremented number in the parent directory.
+
+    Args:
+        parent_path (str): The path to the parent directory where the training folder will be created.
+
+    Returns: Child folder where all training related data should be kept.
+    """
+    parent_path = Path(parent_path)
+    parent_path.mkdir(parents=True, exist_ok=True)
+
+    # Find the next available training folder number
+    existing_folders = [d for d in parent_path.iterdir() if d.is_dir() and d.name.startswith("run_")]
+    existing_numbers = [int(d.name.split("_")[1]) for d in existing_folders if d.name.split("_")[1].isdigit()]
+    next_number = max(existing_numbers, default=0) + 1
+
+    # Create the new training folder
+    new_training_folder = parent_path / f"run_{next_number}"
+    new_training_folder.mkdir()
+
+    return new_training_folder

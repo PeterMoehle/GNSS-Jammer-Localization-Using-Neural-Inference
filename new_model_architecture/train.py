@@ -1,5 +1,5 @@
-from tqdm import tqdm
 import torch
+from tqdm import tqdm
 
 from new_model_architecture.model import GNN
 from new_model_architecture.utils import AverageMeter
@@ -44,7 +44,6 @@ def train_one_epoch(
                 "LR": f"{current_lr:.6f}",
             }
         )
-
         # TODO: Add calculation of RMSE and Metrics and save them to some kind of logs
     return loss_meter.avg
 
