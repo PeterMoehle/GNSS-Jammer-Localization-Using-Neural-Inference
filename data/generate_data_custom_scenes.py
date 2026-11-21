@@ -52,7 +52,7 @@ class DataConfig:
     max_depth: int = 3
     diffraction: bool = True
     samples_per_src: int = 20_000
-    max_num_paths_per_src: int = 2_000_000
+    max_num_paths_per_src: int = 250_000
     batch_size: int = 8  # Kept for CLI/JSON config backwards compatibility
     roi_center_xy_m: tuple[float, float] = (0.0, 0.0)
     roi_half_size_m: float = 500.0
@@ -61,6 +61,8 @@ class DataConfig:
     erosion_iterations: int = 1
     include_parks_as_walkable: bool = True
     prefer_streets_for_jammer: bool = True
+    use_precomputed_walkable_map: bool = True
+    cache_walkable_map_if_missing: bool = True
     n_sensors: int = 20
     sensor_height_m: float = 1.5
     jammer_height_m: float = 1.5
@@ -116,8 +118,66 @@ class WalkableMap:
         return np.column_stack((self.x_m[ix], self.y_m[iy]))
 
 
-def resolve_baked_scene(cfg: DataConfig) -> tuple[str | Path, dict]:
-    """Resolve baked Mitsuba XML path and metadata from baked_scenes_dir."""
+@dataclass
+class PrecomputedSceneMap:
+    x_m: np.ndarray
+    y_m: np.ndarray
+    height_m: np.ndarray
+    street: np.ndarray
+    park: np.ndarray
+    resolution_m: float
+
+    def extract_roi(
+        self,
+        center: tuple[float, float],
+        roi_half_size_m: float,
+        include_parks: bool = True,
+        erosion_iterations: int = 1,
+        min_walkable_cells: int = 1,
+    ) -> WalkableMap | None:
+        """Fast array slice of a localized ROI from the precomputed full-scene grid."""
+        n = int(np.floor(2.0 * roi_half_size_m / self.resolution_m))
+        x0 = center[0] - roi_half_size_m
+        y0 = center[1] - roi_half_size_m
+
+        ix0 = int(np.floor((x0 - self.x_m[0]) / self.resolution_m + 0.5))
+        iy0 = int(np.floor((y0 - self.y_m[0]) / self.resolution_m + 0.5))
+        ix1 = ix0 + n
+        iy1 = iy0 + n
+
+        if ix0 < 0 or iy0 < 0 or ix1 > len(self.x_m) or iy1 > len(self.y_m):
+            return None
+
+        sub_street = self.street[iy0:iy1, ix0:ix1].copy()
+        sub_walkable = sub_street | self.park[iy0:iy1, ix0:ix1] if include_parks else sub_street.copy()
+
+        if erosion_iterations:
+            sub_walkable = binary_erosion(sub_walkable, iterations=erosion_iterations)
+            sub_street = sub_street & sub_walkable
+
+        components, count = label(sub_walkable)
+        if not count:
+            return None
+
+        sizes = np.bincount(components.ravel())
+        sizes[0] = 0
+        if sizes.max() < min_walkable_cells:
+            return None
+
+        main_free = components == sizes.argmax()
+        main_street = sub_street & main_free
+        return WalkableMap(
+            x_m=self.x_m[ix0:ix1].copy(),
+            y_m=self.y_m[iy0:iy1].copy(),
+            height_m=self.height_m[iy0:iy1, ix0:ix1].copy(),
+            free=main_free,
+            street=main_street,
+            resolution_m=self.resolution_m,
+        )
+
+
+def resolve_baked_scene(cfg: DataConfig) -> tuple[str | Path, dict, Path | None]:
+    """Resolve baked Mitsuba XML path, metadata, and scene directory."""
     scene_dir = cfg.baked_scenes_dir / cfg.scene_name
     meta_file = scene_dir / "scene_meta.json"
     if meta_file.exists():
@@ -125,40 +185,24 @@ def resolve_baked_scene(cfg: DataConfig) -> tuple[str | Path, dict]:
         xml_path = scene_dir / meta["xml_filename"]
         if not xml_path.exists():
             raise FileNotFoundError(f"Baked XML missing at {xml_path}")
-        return xml_path, meta
+        return xml_path, meta, scene_dir
 
     direct_xml = Path(cfg.scene_name)
     if direct_xml.suffix == ".xml" and direct_xml.exists():
         meta_path = direct_xml.parent / "scene_meta.json"
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-        return direct_xml, meta
+        return direct_xml, meta, direct_xml.parent
 
     if hasattr(rt.scene, cfg.scene_name):
-        return getattr(rt.scene, cfg.scene_name), {}
+        return getattr(rt.scene, cfg.scene_name), {}, None
 
     raise FileNotFoundError(
         f"Scene '{cfg.scene_name}' not found in {cfg.baked_scenes_dir} and is not a built-in Sionna scene."
     )
 
 
-def load_scene_only(cfg: DataConfig) -> tuple[rt.Scene, dict]:
-    """Load baked scene with merge_shapes=True and configure identical isotropic TX/RX arrays."""
-    scene_source, meta = resolve_baked_scene(cfg)
-    scene = load_scene(str(scene_source), merge_shapes=True)
-    scene.frequency = cfg.frequency_hz
-    # Identical isotropic arrays on TX and RX ensure exact radio reciprocity
-    scene.tx_array = PlanarArray(num_rows=1, num_cols=1, pattern="iso", polarization="V")
-    scene.rx_array = PlanarArray(num_rows=1, num_cols=1, pattern="iso", polarization="V")
-    return scene, meta
-
-
 def _classify_scene_shapes(scene: rt.Scene, include_parks: bool = True) -> tuple[list, list, list]:
-    """
-    Classify merged Mitsuba shapes using BSDF material IDs / shape IDs:
-      - street_shapes: mat-road and OSM road/path/pedestrian shapes
-      - park_shapes: mat-park (optional walkable open space)
-      - obstacle_shapes: mat-building_roof, mat-building_wall, mat-water
-    """
+    """Classify merged Mitsuba shapes using BSDF material IDs / shape IDs."""
     street_shapes = []
     park_shapes = []
     obstacle_shapes = []
@@ -193,17 +237,128 @@ def _classify_scene_shapes(scene: rt.Scene, include_parks: bool = True) -> tuple
     return street_shapes, park_shapes, obstacle_shapes
 
 
+def build_and_cache_precomputed_map(
+    scene: rt.Scene,
+    scene_dir: Path,
+    usable_half_range_m: float,
+    resolution_m: float = 2.0,
+    ray_batch_size: int = 1_000_000,
+) -> PrecomputedSceneMap:
+    """Build and store walkable_map.npz inside scene_dir if not yet present."""
+    bbox = scene.mi_scene.bbox()
+    z_top = float(bbox.max.z) + 10.0
+    n = int(np.floor(2.0 * usable_half_range_m / resolution_m))
+    coords = -usable_half_range_m + (np.arange(n, dtype=np.float32) + 0.5) * resolution_m
+    xx, yy = np.meshgrid(coords, coords)
+    total_pts = xx.size
+
+    street_shapes, park_shapes, obstacle_shapes = _classify_scene_shapes(scene, include_parks=True)
+    street_ptrs = [mi.ShapePtr(s) for s in street_shapes]
+    park_ptrs = [mi.ShapePtr(s) for s in park_shapes]
+    obstacle_ptrs = [mi.ShapePtr(s) for s in obstacle_shapes]
+
+    height_flat = np.full(total_pts, np.nan, dtype=np.float32)
+    street_flat = np.zeros(total_pts, dtype=bool)
+    park_flat = np.zeros(total_pts, dtype=bool)
+    x_flat, y_flat = xx.ravel(), yy.ravel()
+
+    for start in range(0, total_pts, ray_batch_size):
+        end = min(start + ray_batch_size, total_pts)
+        chunk_len = end - start
+        origins = mi.Point3f(
+            x_flat[start:end],
+            y_flat[start:end],
+            np.full(chunk_len, z_top, dtype=np.float32),
+        )
+        hits = scene.mi_scene.ray_intersect(mi.Ray3f(origins, mi.Vector3f(0, 0, -1)))
+        valid = np.asarray(hits.is_valid().numpy())
+        height_flat[start:end] = np.where(valid, z_top - np.asarray(hits.t.numpy()), np.nan)
+
+        is_street = np.zeros(chunk_len, dtype=bool)
+        for ptr in street_ptrs:
+            is_street |= np.asarray((hits.shape == ptr).numpy())
+
+        is_park = np.zeros(chunk_len, dtype=bool)
+        for ptr in park_ptrs:
+            is_park |= np.asarray((hits.shape == ptr).numpy())
+
+        is_obstacle = np.zeros(chunk_len, dtype=bool)
+        for ptr in obstacle_ptrs:
+            is_obstacle |= np.asarray((hits.shape == ptr).numpy())
+
+        street_flat[start:end] = valid & is_street & (~is_obstacle)
+        park_flat[start:end] = valid & is_park & (~is_obstacle)
+
+    out_file = scene_dir / "walkable_map.npz"
+    height_grid = height_flat.reshape(n, n)
+    street_grid = street_flat.reshape(n, n)
+    park_grid = park_flat.reshape(n, n)
+
+    np.savez_compressed(
+        out_file,
+        x_m=coords,
+        y_m=coords,
+        height_m=height_grid,
+        street=street_grid,
+        park=park_grid,
+        resolution_m=np.float32(resolution_m),
+    )
+    print(f"Cached precomputed walkable map -> {out_file}")
+    return PrecomputedSceneMap(
+        x_m=coords,
+        y_m=coords,
+        height_m=height_grid,
+        street=street_grid,
+        park=park_grid,
+        resolution_m=resolution_m,
+    )
+
+
+def load_scene_and_walkable_map(cfg: DataConfig) -> tuple[rt.Scene, dict, PrecomputedSceneMap | None]:
+    """Load baked scene with merge_shapes=True and load/build its cached walkable map."""
+    scene_source, meta, scene_dir = resolve_baked_scene(cfg)
+    scene = load_scene(str(scene_source), merge_shapes=True)
+    scene.frequency = cfg.frequency_hz
+    scene.tx_array = PlanarArray(num_rows=1, num_cols=1, pattern="iso", polarization="V")
+    scene.rx_array = PlanarArray(num_rows=1, num_cols=1, pattern="iso", polarization="V")
+
+    precomputed: PrecomputedSceneMap | None = None
+    if cfg.use_precomputed_walkable_map and scene_dir is not None:
+        walk_file = scene_dir / meta.get("walkable_map_filename", "walkable_map.npz")
+        if walk_file.exists():
+            with np.load(walk_file) as data:
+                stored_res = float(data["resolution_m"])
+                if np.isclose(stored_res, cfg.grid_resolution_m, atol=1e-4):
+                    precomputed = PrecomputedSceneMap(
+                        x_m=data["x_m"],
+                        y_m=data["y_m"],
+                        height_m=data["height_m"],
+                        street=data["street"],
+                        park=data["park"],
+                        resolution_m=stored_res,
+                    )
+        elif cfg.cache_walkable_map_if_missing and "usable_xy_half_range_m" in meta:
+            precomputed = build_and_cache_precomputed_map(
+                scene=scene,
+                scene_dir=scene_dir,
+                usable_half_range_m=float(meta["usable_xy_half_range_m"]),
+                resolution_m=cfg.grid_resolution_m,
+            )
+
+    return scene, meta, precomputed
+
+
 def sample_episode_grid(
     scene: rt.Scene,
     cfg: DataConfig,
     rng: np.random.Generator,
     scene_meta: dict | None = None,
+    precomputed_map: PrecomputedSceneMap | None = None,
     max_retries: int = 100,
 ) -> WalkableMap:
     """
-    Sample a localized ROI strictly inside the non-buffer usable bounds and extract:
-      - free: all walkable cells (roads/paths/parks minus buildings/roofs/water)
-      - street: connected street/path network cells for realistic jammer routing
+    Sample a localized ROI strictly inside the non-buffer usable bounds.
+    Uses fast slicing from `precomputed_map` when available, or falls back to ray-casting.
     """
     bbox = scene.mi_scene.bbox()
     if scene_meta and "usable_xy_half_range_m" in scene_meta:
@@ -221,11 +376,47 @@ def sample_episode_grid(
             f"({max_x - min_x:g} m x {max_y - min_y:g} m) for '{cfg.scene_name}'."
         )
 
-    z_top = float(bbox.max.z) + 10.0
     n = int(np.floor(2 * cfg.roi_half_size_m / cfg.grid_resolution_m))
     if n < 2:
         raise ValueError("ROI too small for grid resolution")
 
+    # Fast path: slice directly from precomputed walkable_map.npz
+    if precomputed_map is not None:
+        for _ in range(max_retries):
+            if cfg.roi_mode == "random":
+                center = (
+                    rng.uniform(min_x + safe_margin, max_x - safe_margin),
+                    rng.uniform(min_y + safe_margin, max_y - safe_margin),
+                )
+            elif cfg.roi_mode == "auto":
+                center = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+            else:
+                center = cfg.roi_center_xy_m
+                if not (
+                    min_x + safe_margin <= center[0] <= max_x - safe_margin
+                    and min_y + safe_margin <= center[1] <= max_y - safe_margin
+                ):
+                    raise ValueError(
+                        f"Manual roi_center_xy_m={center} with roi_half_size_m={safe_margin} "
+                        f"extends into the ray-tracing buffer zone [{min_x}, {max_x}] x [{min_y}, {max_y}]."
+                    )
+
+            grid = precomputed_map.extract_roi(
+                center=center,
+                roi_half_size_m=cfg.roi_half_size_m,
+                include_parks=cfg.include_parks_as_walkable,
+                erosion_iterations=cfg.erosion_iterations,
+                min_walkable_cells=cfg.n_sensors,
+            )
+            if grid is not None:
+                return grid
+
+        raise ValueError(
+            f"Could not find a valid walkable area in precomputed map with >= {cfg.n_sensors} cells after {max_retries} attempts."
+        )
+
+    # Fallback path: on-the-fly ray intersection against Mitsuba shapes
+    z_top = float(bbox.max.z) + 10.0
     street_shapes, park_shapes, obstacle_shapes = _classify_scene_shapes(
         scene, include_parks=cfg.include_parks_as_walkable
     )
@@ -235,9 +426,10 @@ def sample_episode_grid(
 
     for _ in range(max_retries):
         if cfg.roi_mode == "random":
-            center_x = rng.uniform(min_x + safe_margin, max_x - safe_margin)
-            center_y = rng.uniform(min_y + safe_margin, max_y - safe_margin)
-            center = (center_x, center_y)
+            center = (
+                rng.uniform(min_x + safe_margin, max_x - safe_margin),
+                rng.uniform(min_y + safe_margin, max_y - safe_margin),
+            )
         elif cfg.roi_mode == "auto":
             center = ((min_x + max_x) / 2, (min_y + max_y) / 2)
         else:
@@ -307,12 +499,7 @@ def sample_episode_grid(
 
 
 def generate_trajectories(grids: list[WalkableMap], cfg: DataConfig, rng: np.random.Generator):
-    """
-    Generate street/path-following jammer trajectories:
-      - Spawns on street/path cells when available (falling back to general walkable cells).
-      - Advances along street corridors using momentum-guided heading proposals and
-        prioritizes moves that stay on streets/paths while keeping intermediate steps obstacle-free.
-    """
+    """Generate street/path-following jammer trajectories."""
     positions = np.empty((cfg.episodes, cfg.n_steps, 3), dtype=np.float32)
     step = cfg.speed_mps * cfg.dt_s
     checks = max(3, int(np.ceil(step / (cfg.grid_resolution_m / 2))) + 1)
@@ -382,7 +569,7 @@ def sample_sensor_layout(
         chosen = rng.choice(len(candidates), cfg.n_sensors, replace=False)
     elif placement_mode == "lhs":
         sampler = qmc.LatinHypercube(d=2, seed=rng)
-        unit_samples = sampler.random(n=cfg.n_sensors)  # (N, 2) in [0, 1]^2
+        unit_samples = sampler.random(n=cfg.n_sensors)
 
         mins = candidates.min(axis=0)
         maxs = candidates.max(axis=0)
@@ -390,7 +577,7 @@ def sample_sensor_layout(
 
         cost_matrix = cdist(target_xy, candidates)
         _, chosen = linear_sum_assignment(cost_matrix)
-    else:  # "spread" (farthest-point sampling)
+    else:  # "spread"
         chosen = [int(rng.integers(len(candidates)))]
         distances = np.sum((candidates - candidates[chosen[0]]) ** 2, axis=1)
         for _ in range(cfg.n_sensors - 1):
@@ -418,7 +605,6 @@ def setup_sensors_per_episode(
     cfg: DataConfig,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, list[np.ndarray], list[str]]:
-    """Sample sensor positions and k-NN graphs per episode across configured placement modes."""
     modes = cfg.sensor_placements
     episode_modes = [modes[e % len(modes)] for e in rng.permutation(cfg.episodes)]
 
@@ -439,11 +625,7 @@ def compute_edge_attributes(sensors: np.ndarray, edges: np.ndarray) -> np.ndarra
 
 
 def _path_statistics(paths, n_rx: int, n_tx: int):
-    """
-    Reduce per-path RT tensors on the active Dr.Jit backend; transfer only (n_rx, n_tx).
-    With reciprocal TX/RX assignment (n_rx=T trajectory points, n_tx=N sensors),
-    this directly returns (T, N) arrays without needing a transpose.
-    """
+    """Reduce per-path RT tensors on the active Dr.Jit backend; transfer only (n_rx, n_tx)."""
     valid = paths.valid
     shape = tuple(valid.shape)
     if len(shape) != 3 or shape[:2] != (n_rx, n_tx):
@@ -481,13 +663,7 @@ def simulate_links(
     cfg: DataConfig,
     checkpoint: Path | None = None,
 ):
-    """
-    Simulate (E, T, N) links in ONE PathSolver call per episode via channel reciprocity:
-      - The N stationary sensors act as Transmitters (TX).
-      - All T jammer trajectory steps act as Receivers (RX).
-    Because TX and RX use identical isotropic antennas, path_gain(sensor -> jammer)
-    equals path_gain(jammer -> sensor), and _path_statistics outputs (T, N) directly.
-    """
+    """Simulate (E, T, N) links in ONE PathSolver call per episode via channel reciprocity."""
     if positions.ndim != 3 or positions.shape[-1] != 3:
         raise ValueError("positions must have shape (E, T, 3)")
     E, T, _ = positions.shape
@@ -588,7 +764,6 @@ def simulate_links(
 
 
 def output_path(cfg: DataConfig) -> Path:
-    """Resolve the dataset filename, without creating any directories."""
     name = cfg.output_name or f"{cfg.scene_name}_seed{cfg.seed}.h5"
     if Path(name).name != name or not name.endswith(".h5"):
         raise ValueError("output_name must be an .h5 filename, not a path")
@@ -700,7 +875,6 @@ def save_dataset(
 
 
 def parse_config(argv=None) -> DataConfig:
-    """Read optional JSON config, then apply CLI overrides for all DataConfig fields."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--config", type=Path, help="Optional JSON file containing DataConfig fields")
     defaults = DataConfig()
@@ -762,16 +936,15 @@ def parse_config(argv=None) -> DataConfig:
 
 
 def compute_wcl_position(sensors: np.ndarray, rssi: np.ndarray, detected: np.ndarray) -> np.ndarray:
-    """Calculate Weighted Centroid Localization (WCL) per Episode and TimeStep."""
     power_linear = np.where(detected, 10.0 ** (rssi / 10.0), 0.0)
-    total_power = np.sum(power_linear, axis=-1, keepdims=True)  # (E, T, 1)
+    total_power = np.sum(power_linear, axis=-1, keepdims=True)
 
     weights = np.divide(power_linear, total_power, out=np.zeros_like(power_linear), where=total_power > 0)
     wcl_pos = np.sum(weights[..., None] * sensors[:, None, :, :], axis=2)
 
     no_detection = total_power.squeeze(-1) == 0
     if np.any(no_detection):
-        geom_center = np.mean(sensors, axis=1)  # (E, 3)
+        geom_center = np.mean(sensors, axis=1)
         ep_idx, _ = np.nonzero(no_detection)
         wcl_pos[no_detection] = geom_center[ep_idx]
 
@@ -785,7 +958,6 @@ def add_measurements_with_mask(
     cfg: DataConfig,
     rng: np.random.Generator,
 ) -> dict:
-    """Compute RSSI values, binary detection masks, WCL prior, and neighbor/temporal gradients."""
     E, T, N = links["path_gain_linear"].shape
     gain = links["path_gain_linear"]
     gain_db = np.full(gain.shape, np.nan, dtype=np.float32)
@@ -837,9 +1009,14 @@ def add_measurements_with_mask(
 
 def generate_scene_dataset(cfg: DataConfig, split_tag: str = "mixed") -> Path:
     rng_env = np.random.default_rng(cfg.seed)
-    scene, scene_meta = load_scene_only(cfg)
+    scene, scene_meta, precomputed_map = load_scene_and_walkable_map(cfg)
 
-    grids = [sample_episode_grid(scene, cfg, rng_env, scene_meta=scene_meta) for _ in range(cfg.episodes)]
+    grids = [
+        sample_episode_grid(
+            scene, cfg, rng_env, scene_meta=scene_meta, precomputed_map=precomputed_map
+        )
+        for _ in range(cfg.episodes)
+    ]
 
     rng_traj = np.random.default_rng(cfg.seed + 1)
     rng_sens = np.random.default_rng(cfg.seed)
@@ -878,12 +1055,6 @@ def generate_multi_scene_dataset(
     output_dir: str = "data/multi_scene_ds",
     roi_mode: Literal["manual", "auto", "random"] = "random",
 ):
-    """
-    Generate three clean dataset groups:
-      1. train/: Training episodes across train_scenes (with mixed sensor placements).
-      2. test_id/: In-Distribution test episodes (unseen ROIs/episodes from trained scenes).
-      3. test_ood/: Out-of-Distribution test episodes (completely held-out cities).
-    """
     out_path = Path(output_dir)
     if in_dist_test_scenes is None:
         in_dist_test_scenes = list(train_scenes)
@@ -914,7 +1085,7 @@ def generate_multi_scene_dataset(
             max_depth=3,
             diffraction=True,
             samples_per_src=20_000,
-            max_num_paths_per_src=2_000_000,
+            max_num_paths_per_src=250_000,
             roi_center_xy_m=(0.0, 0.0),
             roi_half_size_m=500.0,
             roi_mode=roi_mode,
