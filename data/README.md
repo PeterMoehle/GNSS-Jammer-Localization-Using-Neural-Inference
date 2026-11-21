@@ -30,6 +30,21 @@ Note: For data creation using google colab:
 
 ## generate_data: Creates data for a single scene. With changing sensor positions. Storing it as HDF5
 
+### Usage
+One call generates one scene. Every `DataConfig` field is a command line option (`--help` lists them); options override the values of an optional `--config` JSON file.
+
+```
+python data/generate_data.py --config data/config.json --scene-name munich --roi-mode random --episodes 500 --output-name munich_train.h5
+```
+
+- `--roi-mode random` samples a new ROI per episode, `auto` uses the scene centre and `manual` uses `--roi-center-xy-m X Y`. Every mode stores one map per episode.
+- `--no-diffraction` switches diffraction off (default: on).
+- `--sensor-placement` accepts `spread`, `random` or `lhs`.
+- Ray tracing results are checkpointed to `<output>.links.npz` every `--chunk-episodes` episodes. Rerunning the same command after a crash continues from the checkpoint; a checkpoint from a different configuration is ignored.
+- The dataset is written to `<output>.partial.h5` and renamed when complete, so an existing `.h5` file is always a finished dataset.
+- Walkable ground is the terrain mesh (the shape with the largest footprint), which makes scenes with hills such as `san_francisco` usable.
+- `generate_multi_scene_dataset(...)` still generates several scenes with fixed settings from Python.
+
 
 ### Data-Pipeline:
 - load_env: Load the selected mitsuba scene; Identify walkable areas --> Note: Will be streets in future; Creates grid for the subregion of interest (ROI); 
