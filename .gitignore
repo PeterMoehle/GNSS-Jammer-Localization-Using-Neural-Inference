@@ -23,11 +23,11 @@ __pycache__/
 !.env.example
 
 # External third-party repositories
-/externals/
+externals/baseline
+externals/tools
 
 # Local Workspace Data
 /workspace_inputs/
-/workspace_inputs_old/
 /workspace_outputs/
 /cache/
 
