@@ -1,10 +1,11 @@
 """Episode-specific sensor layouts and batched Sionna RT measurements.
 
-python sionna_dataset.py \
-    --config dataset_config.example.json \
+python data/generate_data.py \
+    --config data/config.json \
+    --scene-name munich \
+    --roi-mode random \
     --episodes 500 \
-    --batch-size 16 \
-    --output-name experiment_002.h5
+    --output-name munich_train.h5
 """
 
 import argparse
@@ -20,7 +21,10 @@ import mitsuba as mi
 import numpy as np
 import sionna.rt as rt
 from scipy.ndimage import binary_erosion, label
+from scipy.optimize import linear_sum_assignment
 from scipy.spatial import cKDTree
+from scipy.spatial.distance import cdist
+from scipy.stats import qmc
 from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
 from tqdm import tqdm
 import sys
@@ -34,6 +38,7 @@ class DataConfig:
     sensitivity_dbm: float = -110.0
     rssi_noise_std_db: float = 0.0
     max_depth: int = 3
+    diffraction: bool = True
     samples_per_src: int = 20_000
     batch_size: int = 8
     roi_center_xy_m: tuple[float, float] = (0.0, 0.0)
@@ -44,7 +49,7 @@ class DataConfig:
     n_sensors: int = 20
     sensor_height_m: float = 1.5
     jammer_height_m: float = 1.5
-    sensor_placement: Literal["random", "spread"] = "spread"
+    sensor_placement: Literal["random", "spread", "lhs"] = "spread"
     graph_neighbors: int = 3
     episodes: int = 32
     n_steps: int = 60
@@ -156,6 +161,8 @@ def sample_episode_grid(scene: rt.Scene, cfg: DataConfig, rng: np.random.Generat
     safe_margin = cfg.roi_half_size_m
     z_top = float(bbox.max.z) + 10.0
     n = int(np.floor(2 * cfg.roi_half_size_m / cfg.grid_resolution_m))
+    footprint = lambda shape: (shape.bbox().max.x - shape.bbox().min.x) * (shape.bbox().max.y - shape.bbox().min.y)
+    terrain = mi.ShapePtr(max(scene.mi_scene.shapes(), key=footprint))
     
     if n < 2:
         raise ValueError("ROI too small for grid resolution")
@@ -182,14 +189,15 @@ def sample_episode_grid(scene: rt.Scene, cfg: DataConfig, rng: np.random.Generat
         valid = np.asarray(hits.is_valid().numpy()).reshape(xx.shape)
         height = np.where(valid, z_top - np.asarray(hits.t.numpy()).reshape(xx.shape), np.nan)
 
-        ground = valid & (np.abs(height - float(bbox.min.z)) <= cfg.ground_tolerance_m)
+        on_terrain = np.asarray((hits.shape == terrain).numpy()).reshape(xx.shape)
+        ground = valid & (on_terrain | (np.abs(height - float(bbox.min.z)) <= cfg.ground_tolerance_m))
         if cfg.erosion_iterations:
             ground = binary_erosion(ground, iterations=cfg.erosion_iterations)
         components, count = label(ground)
         
-        if count > 0:
-            sizes = np.bincount(components.ravel())
-            sizes[0] = 0
+        sizes = np.bincount(components.ravel())
+        sizes[0] = 0
+        if sizes.max() >= cfg.n_sensors:
             # Return the largest connected walkable component
             return WalkableMap(x_m, y_m, height, components == sizes.argmax(), cfg.grid_resolution_m)
 
@@ -319,7 +327,8 @@ def _path_statistics(paths, n_rx: int, batch_size: int):
     return tuple(np.asarray(x.numpy()).reshape(n_rx, batch_size) for x in (gain, los, count))
 
 
-def simulate_links(scene: rt.Scene, positions: np.ndarray, sensors: np.ndarray, cfg: DataConfig):
+def simulate_links(scene: rt.Scene, positions: np.ndarray, sensors: np.ndarray, cfg: DataConfig,
+                   checkpoint: Path | None = None):
     """Simulate (E, T, N) links with one solver and reusable TX slots."""
     if positions.ndim != 3 or positions.shape[-1] != 3:
         raise ValueError("positions must have shape (E, T, 3)")
@@ -337,6 +346,15 @@ def simulate_links(scene: rt.Scene, positions: np.ndarray, sensors: np.ndarray, 
     outputs = {key: np.zeros((E, T, N), dtype) for key, dtype in (
         ("path_gain_linear", np.float32), ("los", bool), ("num_paths", np.int32)
     )}
+    state = json.dumps({**asdict(cfg), "overwrite": None}, default=str, sort_keys=True)
+    first = 0
+    if checkpoint is not None and checkpoint.exists():
+        with np.load(checkpoint) as saved:
+            if str(saved["config_json"]) == state:
+                first = int(saved["episodes_done"])
+                for key in outputs:
+                    outputs[key][:] = saved[key]
+        print(f"Checkpoint {checkpoint}: resuming at episode {first} of {E}")
 
     scene.remove(list(scene.transmitters))
     slots = [Transmitter(name=f"jammer_slot_{i:03d}",
@@ -348,9 +366,9 @@ def simulate_links(scene: rt.Scene, positions: np.ndarray, sensors: np.ndarray, 
     start_time = perf_counter()
 
     try:
-        with tqdm(total=calls, desc=f"Ray tracing ({scene.name if hasattr(scene, 'name') else 'Scene'})", file=sys.stdout, dynamic_ncols=True) as progress:
+        with tqdm(total=calls, initial=first * (calls // E), desc=f"Ray tracing ({scene.name if hasattr(scene, 'name') else 'Scene'})", file=sys.stdout, dynamic_ncols=True) as progress:
             #with tqdm(total=calls, desc="Ray tracing") as progress:
-            for e in range(E):
+            for e in range(first, E):
                 for receiver, pos in zip(receivers, sensors[e]):
                     receiver.position = mi.Point3f(*map(float, pos))
 
@@ -361,7 +379,7 @@ def simulate_links(scene: rt.Scene, positions: np.ndarray, sensors: np.ndarray, 
                     paths = solver(
                         scene, max_depth=cfg.max_depth, samples_per_src=cfg.samples_per_src,
                         synthetic_array=True, los=True, specular_reflection=True,
-                        diffuse_reflection=False, refraction=False, diffraction=True,
+                        diffuse_reflection=False, refraction=False, diffraction=cfg.diffraction,
                         seed=cfg.seed + e * T + start,
                     )
                     gain, los, count = _path_statistics(paths, N, B)
@@ -370,11 +388,16 @@ def simulate_links(scene: rt.Scene, positions: np.ndarray, sensors: np.ndarray, 
                     outputs["los"][e, start:end] = los.T[:len(batch)]
                     outputs["num_paths"][e, start:end] = count.T[:len(batch)]
                     progress.update()
+
+                if checkpoint is not None and (e + 1) % cfg.chunk_episodes == 0 and e + 1 < E:
+                    with open(checkpoint.with_suffix(".tmp"), "wb") as file:
+                        np.savez(file, config_json=state, episodes_done=e + 1, **outputs)
+                    checkpoint.with_suffix(".tmp").replace(checkpoint)
     finally:
         scene.remove([slot.name for slot in slots])
 
     elapsed = perf_counter() - start_time
-    print(f"Solver time: {elapsed:.2f} s | {1000 * elapsed / (E * T):.2f} ms/position"
+    print(f"Solver time: {elapsed:.2f} s | {1000 * elapsed / max(1, (E - first) * T):.2f} ms/position"
           f" | Calls: {calls} | Backend: {mi.variant()}")
     return outputs
 
@@ -462,8 +485,10 @@ def save_dataset(
 
     output = output_path(cfg)
     output.parent.mkdir(parents=True, exist_ok=True)
-    # 'x' refuses to overwrite an existing file, even if another process created it.
-    with h5py.File(output, "w" if cfg.overwrite else "x") as file:
+    if output.exists() and not cfg.overwrite:
+        raise FileExistsError(f"{output} already exists (use --overwrite to replace it)")
+    partial = output.with_suffix(".partial.h5")
+    with h5py.File(partial, "w") as file:
         file.attrs["config_json"] = json.dumps(asdict(cfg), default=str, sort_keys=True)
         for key, value in asdict(cfg).items():
             file.attrs[key] = str(value) if isinstance(value, Path) else value
@@ -486,6 +511,7 @@ def save_dataset(
         file["graph/edge_index"].attrs["axes"] = "source_or_target,edge"
         file["graph/edge_attr"].attrs["columns"] = "dx_m,dy_m,dz_m,distance_m,exp_weight"
         file["graph/edge_ptr"].attrs["description"] = "Edges for episode e: edge_ptr[e]:edge_ptr[e+1]"
+    partial.replace(output)
     return output
 
 
@@ -533,7 +559,7 @@ def parse_config(argv=None) -> DataConfig:
         or cfg.speed_mps < 0 or cfg.rssi_noise_std_db < 0
         or not 0 <= cfg.test_fraction < 1
         or cfg.scene_name not in get_args(DataConfig.__dataclass_fields__["scene_name"].type)
-        or cfg.sensor_placement not in ("random", "spread")):
+        or cfg.sensor_placement not in get_args(DataConfig.__dataclass_fields__["sensor_placement"].type)):
         parser.error("Invalid configuration values; check ranges and scene/placement choices")
     output_path(cfg)  # Validate the output filename before starting ray tracing.
     return cfg
@@ -545,17 +571,7 @@ def main(argv=None) -> Path:
     if output.exists() and not cfg.overwrite:
         raise FileExistsError(f"{output} already exists (use --overwrite to replace it)")
 
-    scene, grid = load_environment(cfg)
-    positions, velocities = generate_trajectories(grid, cfg, np.random.default_rng(cfg.seed + 1))
-    sensors, edges = setup_sensors_per_episode(scene, grid, cfg, np.random.default_rng(cfg.seed))
-    links = simulate_links(scene, positions, sensors, cfg)
-    measurements = add_measurements(links, cfg, np.random.default_rng(cfg.seed + 2))
-    output = save_dataset(
-        cfg, grid, sensors, edges, positions, velocities, measurements,
-        np.random.default_rng(cfg.seed + 3),
-    )
-    print(f"Saved {output.resolve()} | sensors={sensors.shape} | RSSI={measurements['rssi_dbm'].shape}")
-    return output
+    return generate_scene_dataset(cfg)
 
 
 import json
@@ -644,6 +660,34 @@ def add_measurements_with_mask(links: dict, sensors: np.ndarray, edges: list[np.
         "rssi_time_gradient": rssi_time_gradient,
     }
 
+def generate_scene_dataset(cfg: DataConfig) -> Path:
+    rng_env = np.random.default_rng(cfg.seed)
+    scene = load_scene_only(cfg)
+
+    grids = []
+    for _ in range(cfg.episodes):
+        grids.append(sample_episode_grid(scene, cfg, rng_env))
+
+    rng_traj = np.random.default_rng(cfg.seed + 1)
+    rng_sens = np.random.default_rng(cfg.seed)
+    rng_meas = np.random.default_rng(cfg.seed + 2)
+    rng_save = np.random.default_rng(cfg.seed + 3)
+
+    positions, velocities = generate_trajectories(grids, cfg, rng_traj)
+    sensors, edges = setup_sensors_per_episode(scene, grids, cfg, rng_sens)
+    checkpoint = output_path(cfg).with_suffix(".links.npz")
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    links = simulate_links(scene, positions, sensors, cfg, checkpoint)
+    measurements = add_measurements_with_mask(links, sensors, edges, cfg, rng_meas)
+
+    output = save_dataset(
+        cfg, grids, sensors, edges, positions, velocities, measurements, rng_save
+    )
+    checkpoint.unlink(missing_ok=True)
+    print(f"Saved: {output}")
+    return output
+
+
 def generate_multi_scene_dataset(
     train_scenes: list[str] = ["munich", "florence", "san_francisco"],
     test_scene: str = "etoile",
@@ -677,6 +721,7 @@ def generate_multi_scene_dataset(
             sensitivity_dbm=-110.0,
             rssi_noise_std_db=0.0,
             max_depth=3,
+            diffraction=True,
             samples_per_src=20_000,
             batch_size=8,
             roi_center_xy_m=(0.0, 0.0),
@@ -704,46 +749,9 @@ def generate_multi_scene_dataset(
             chunk_episodes=64,
         )
 
-
-        rng_env = np.random.default_rng(cfg.seed)
-        scene = load_scene_only(cfg)
-        #scene, grid = load_environment(cfg, rng=rng_env)
-
-        grids = []
-        for _ in range(cfg.episodes):
-            grids.append(sample_episode_grid(scene, cfg, rng_env))
-        
-        rng_traj = np.random.default_rng(cfg.seed + 1)
-        rng_sens = np.random.default_rng(cfg.seed)
-        rng_meas = np.random.default_rng(cfg.seed + 2)
-        rng_save = np.random.default_rng(cfg.seed + 3)
-
-        #positions, velocities = generate_trajectories(grid, cfg, rng_traj)
-        #sensors, edges = setup_sensors_per_episode(scene, grid, cfg, rng_sens)
-        #links = simulate_links(scene, positions, sensors, cfg)
-        positions, velocities = generate_trajectories(grids, cfg, rng_traj)
-        sensors, edges = setup_sensors_per_episode(scene, grids, cfg, rng_sens)
-        links = simulate_links(scene, positions, sensors, cfg)
-
-        #measurements = add_measurements_with_mask(links, cfg, rng_meas)
-        measurements = add_measurements_with_mask(links, sensors, edges, cfg, rng_meas)
-
-        # Save HDF5 file per scene
-        save_dataset(
-            cfg, grids, sensors, edges, positions, velocities, measurements, rng_save
-        )
-        print(f"Saved: {cfg.output_dir / cfg.output_name}")
-
-        del scene, grids, positions, velocities, sensors, links, measurements
+        generate_scene_dataset(cfg)
         #dr.drjit_malloc_trim()  # Frees Dr.Jit memory caches
         gc.collect()
 
 if __name__ == "__main__":
-    #main()
-    # Execute generation
-    generate_multi_scene_dataset(
-        train_scenes=["munich", "florence"],
-        test_scene="etoile",
-        episodes_per_scene=500,
-        roi_mode="random"
-    )
+    main()
