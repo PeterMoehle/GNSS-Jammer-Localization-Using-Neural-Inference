@@ -26,6 +26,12 @@ Note: For data creation using google colab:
 - Angles that have been used in baseline paper: $[\sin\theta, \cos\theta, \sin\phi, \cos\phi]$
 - Improve pipeline - using OSM-To-Sionna and street information as walkable area --> scripts_data
 
+
+Later: 
+- varying jammer power, 
+- Whatever this is: Because antennas are isotropic (pattern="iso"), swap TX and RX in PathSolver: place the $N$ stationary sensors as TX and all $T$ trajectory points (plus extra candidate points) as RX in a single PathSolver call per episode. This cuts ray-tracing calls by ~4–8× and lets you reuse one RT pass across multiple sampled sensor layouts.
+- Data should be stored as one big file, including the dataconfig
+
 ---
 
 ## generate_data: Creates data for a single scene. With changing sensor positions. Storing it as HDF5
