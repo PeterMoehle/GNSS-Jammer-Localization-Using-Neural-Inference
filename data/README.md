@@ -125,8 +125,9 @@ Regenerate OSM Prep and Scenebaking (but osm only).
 Reason: We excluded highway information (streets...), but we need them.
 
 Solution:
-- Remove Cached prepared osm: rm -rf workspace_inputs/osm/prepared/germany
+- Remove Cached prepared osm if exist: rm -rf workspace_inputs/osm/prepared/germany
 - Download the raw data via uv run sripts_data/01_sync_externals.py --> Comment out line 37 and 38, so it will download germany and lithuania
 - Reexecute osm preperation: uv run sripts_data/02_prepare_osm_batched.py
 - Reexecute scene baking !!! but with flag for osm only... uv run scripts/bake_scenes.py --osm-only
+- Reexecute scene baking !!! but with flag for precomputing walkable area only... uv run scripts/bake_scenes.py --walkable-only
 - Verification: grep -E 'k="(highway|railway)"' workspace_inputs/baked_scenes/<your_city_name>/osm/map.osm | head -n 10
