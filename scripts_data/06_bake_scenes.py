@@ -291,7 +291,7 @@ def build_and_save_walkable_map(
 
     del rt_scene
     dr.sync_thread()
-    dr.drjit_malloc_trim()
+    dr.flush_malloc_cache()
     gc.collect()
 
     print(

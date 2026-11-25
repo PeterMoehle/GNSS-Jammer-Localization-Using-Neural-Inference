@@ -30,7 +30,7 @@ import h5py
 import mitsuba as mi
 import numpy as np
 import sionna.rt as rt
-from scipy.ndimage import binary_erosion, label
+from scipy.ndimage import binary_closing, binary_erosion, label
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
@@ -58,7 +58,7 @@ class DataConfig:
     roi_half_size_m: float = 500.0
     grid_resolution_m: float = 2.0
     ground_tolerance_m: float = 0.5
-    erosion_iterations: int = 1
+    erosion_iterations: int = 0
     include_parks_as_walkable: bool = True
     prefer_streets_for_jammer: bool = True
     use_precomputed_walkable_map: bool = True
@@ -90,6 +90,7 @@ class WalkableMap:
     height_m: np.ndarray
     free: np.ndarray
     street: np.ndarray
+    sensor_area: np.ndarray
     resolution_m: float
 
     def lookup(self, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -116,6 +117,47 @@ class WalkableMap:
         mask = self.street if (streets_only and np.any(self.street)) else self.free
         iy, ix = np.nonzero(mask)
         return np.column_stack((self.x_m[ix], self.y_m[iy]))
+
+    def sensor_candidates(self) -> np.ndarray:
+        iy, ix = np.nonzero(self.sensor_area)
+        return np.column_stack((self.x_m[ix], self.y_m[iy]))
+
+
+def build_walkable_map(
+    x_m: np.ndarray,
+    y_m: np.ndarray,
+    height_m: np.ndarray,
+    street: np.ndarray,
+    walkable: np.ndarray,
+    resolution_m: float,
+    erosion_iterations: int,
+    min_cells: int,
+) -> WalkableMap | None:
+    if erosion_iterations:
+        walkable = binary_erosion(walkable, iterations=erosion_iterations)
+        street = street & walkable
+    if walkable.sum() < min_cells:
+        return None
+
+    # Rasterised streets often touch only diagonally or have one-cell gaps.
+    neighbourhood = np.ones((3, 3), dtype=bool)
+    connected = walkable | binary_closing(walkable, structure=neighbourhood)
+    components, _ = label(connected, structure=neighbourhood)
+    sizes = np.bincount(components.ravel())
+    sizes[0] = 0
+    if sizes.max() < min_cells:
+        return None
+
+    main = components == sizes.argmax()
+    return WalkableMap(
+        x_m=x_m,
+        y_m=y_m,
+        height_m=height_m,
+        free=main,
+        street=street & main,
+        sensor_area=walkable,
+        resolution_m=resolution_m,
+    )
 
 
 @dataclass
@@ -150,29 +192,15 @@ class PrecomputedSceneMap:
 
         sub_street = self.street[iy0:iy1, ix0:ix1].copy()
         sub_walkable = sub_street | self.park[iy0:iy1, ix0:ix1] if include_parks else sub_street.copy()
-
-        if erosion_iterations:
-            sub_walkable = binary_erosion(sub_walkable, iterations=erosion_iterations)
-            sub_street = sub_street & sub_walkable
-
-        components, count = label(sub_walkable)
-        if not count:
-            return None
-
-        sizes = np.bincount(components.ravel())
-        sizes[0] = 0
-        if sizes.max() < min_walkable_cells:
-            return None
-
-        main_free = components == sizes.argmax()
-        main_street = sub_street & main_free
-        return WalkableMap(
+        return build_walkable_map(
             x_m=self.x_m[ix0:ix1].copy(),
             y_m=self.y_m[iy0:iy1].copy(),
             height_m=self.height_m[iy0:iy1, ix0:ix1].copy(),
-            free=main_free,
-            street=main_street,
+            street=sub_street,
+            walkable=sub_walkable,
             resolution_m=self.resolution_m,
+            erosion_iterations=erosion_iterations,
+            min_cells=min_walkable_cells,
         )
 
 
@@ -471,27 +499,18 @@ def sample_episode_grid(
         raw_street = valid & is_street_surface & (~is_obstacle)
         raw_walkable = valid & (is_street_surface | is_park_surface) & (~is_obstacle)
 
-        if cfg.erosion_iterations:
-            raw_walkable = binary_erosion(raw_walkable, iterations=cfg.erosion_iterations)
-            raw_street = raw_street & raw_walkable
-
-        components, count = label(raw_walkable)
-        if not count:
-            continue
-
-        sizes = np.bincount(components.ravel())
-        sizes[0] = 0
-        if sizes.max() >= cfg.n_sensors:
-            main_free = components == sizes.argmax()
-            main_street = raw_street & main_free
-            return WalkableMap(
-                x_m=x_m,
-                y_m=y_m,
-                height_m=height,
-                free=main_free,
-                street=main_street,
-                resolution_m=cfg.grid_resolution_m,
-            )
+        grid = build_walkable_map(
+            x_m=x_m,
+            y_m=y_m,
+            height_m=height,
+            street=raw_street,
+            walkable=raw_walkable,
+            resolution_m=cfg.grid_resolution_m,
+            erosion_iterations=cfg.erosion_iterations,
+            min_cells=cfg.n_sensors,
+        )
+        if grid is not None:
+            return grid
 
     raise ValueError(
         f"Could not find a valid OSM walkable area with >= {cfg.n_sensors} cells after {max_retries} attempts."
@@ -527,24 +546,27 @@ def generate_trajectories(grids: list[WalkableMap], cfg: DataConfig, rng: np.ran
             best_fallback = None
 
             jitter = rng.normal(0, cfg.heading_std_rad)
-            for idx, delta_angle in enumerate(turn_offsets):
-                angle = heading + jitter + delta_angle if idx < 9 else heading + delta_angle
-                move = step * np.array([np.cos(angle), np.sin(angle)])
-                samples = xy + np.linspace(0, 1, checks)[:, None] * move
+            for scale in (1.0, 0.5, 0.25):
+                for idx, delta_angle in enumerate(turn_offsets):
+                    angle = heading + jitter + delta_angle if idx < 9 else heading + delta_angle
+                    move = scale * step * np.array([np.cos(angle), np.sin(angle)])
+                    samples = xy + np.linspace(0, 1, checks)[:, None] * move
 
-                if not grid.lookup(samples)[0].all():
-                    continue
+                    if not grid.lookup(samples)[0].all():
+                        continue
 
-                if use_streets:
-                    if grid.lookup_street(samples).all():
+                    if use_streets:
+                        if grid.lookup_street(samples).all():
+                            xy, heading = xy + move, angle
+                            moved = True
+                            break
+                        elif best_fallback is None:
+                            best_fallback = (xy + move, angle)
+                    else:
                         xy, heading = xy + move, angle
                         moved = True
                         break
-                    elif best_fallback is None:
-                        best_fallback = (xy + move, angle)
-                else:
-                    xy, heading = xy + move, angle
-                    moved = True
+                if moved:
                     break
 
             if not moved and best_fallback is not None:
@@ -561,7 +583,7 @@ def sample_sensor_layout(
     rng: np.random.Generator,
     placement_mode: PlacementType,
 ) -> tuple[np.ndarray, np.ndarray]:
-    candidates = grid.candidates(streets_only=False)
+    candidates = grid.sensor_candidates()
     if not 1 <= cfg.n_sensors <= len(candidates):
         raise ValueError("Invalid n_sensors")
 
@@ -1091,7 +1113,7 @@ def generate_multi_scene_dataset(
             roi_mode=roi_mode,
             grid_resolution_m=2.0,
             ground_tolerance_m=0.5,
-            erosion_iterations=1,
+            erosion_iterations=0,
             include_parks_as_walkable=True,
             prefer_streets_for_jammer=True,
             n_sensors=20,
@@ -1115,7 +1137,7 @@ def generate_multi_scene_dataset(
 
         generate_scene_dataset(cfg, split_tag=split_tag)
         dr.sync_thread()
-        dr.drjit_malloc_trim()
+        dr.flush_malloc_cache()
         gc.collect()
 
 
