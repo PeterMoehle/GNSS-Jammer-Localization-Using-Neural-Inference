@@ -685,7 +685,7 @@ def simulate_links(
     cfg: DataConfig,
     checkpoint: Path | None = None,
 ):
-    """Simulate (E, T, N) links in ONE PathSolver call per episode via channel reciprocity."""
+    """Simulate (E, T, N) links in ONE PathSolver call per episode; via reciprocity the side with fewer points transmits."""
     if positions.ndim != 3 or positions.shape[-1] != 3:
         raise ValueError("positions must have shape (E, T, 3)")
     E, T, _ = positions.shape
@@ -712,20 +712,23 @@ def simulate_links(
     scene.remove(list(scene.transmitters))
     scene.remove(list(scene.receivers))
 
+    jammer_tx = N > T
+    tx_points, rx_points = (positions, sensors) if jammer_tx else (sensors, positions)
+    n_tx, n_rx = tx_points.shape[1], rx_points.shape[1]
     tx_slots = [
         Transmitter(
-            name=f"sensor_tx_{i:03d}",
-            position=sensors[0, i].tolist(),
+            name=f"tx_{i:03d}",
+            position=tx_points[0, i].tolist(),
             power_dbm=cfg.tx_power_dbm,
         )
-        for i in range(N)
+        for i in range(n_tx)
     ]
     rx_slots = [
         Receiver(
-            name=f"jammer_rx_{t:03d}",
-            position=positions[0, t].tolist(),
+            name=f"rx_{i:03d}",
+            position=rx_points[0, i].tolist(),
         )
-        for t in range(T)
+        for i in range(n_rx)
     ]
     scene.add(tx_slots)
     scene.add(rx_slots)
@@ -742,10 +745,10 @@ def simulate_links(
             dynamic_ncols=True,
         ) as progress:
             for e in range(first, E):
-                for tx, pos in zip(tx_slots, sensors[e]):
+                for tx, pos in zip(tx_slots, tx_points[e]):
                     tx.position = mi.Point3f(*map(float, pos))
 
-                for rx, pos in zip(rx_slots, positions[e]):
+                for rx, pos in zip(rx_slots, rx_points[e]):
                     rx.position = mi.Point3f(*map(float, pos))
 
                 paths = solver(
@@ -762,7 +765,9 @@ def simulate_links(
                     seed=cfg.seed + e,
                 )
 
-                gain, los, count = _path_statistics(paths, n_rx=T, n_tx=N)
+                gain, los, count = _path_statistics(paths, n_rx=n_rx, n_tx=n_tx)
+                if jammer_tx:
+                    gain, los, count = gain.T, los.T, count.T
                 outputs["path_gain_linear"][e] = gain
                 outputs["los"][e] = los
                 outputs["num_paths"][e] = count
@@ -780,7 +785,7 @@ def simulate_links(
     done_episodes = max(1, E - first)
     print(
         f"Solver time: {elapsed:.2f} s | {1000 * elapsed / (done_episodes * T):.2f} ms/position"
-        f" | Calls: {done_episodes} (reciprocal) | Backend: {mi.variant()}"
+        f" | Calls: {done_episodes} ({'jammer' if jammer_tx else 'sensors'} transmit) | Backend: {mi.variant()}"
     )
     return outputs
 
@@ -877,7 +882,7 @@ def save_dataset(
             axis_order="episode,time_step,sensor",
             graph_format="packed_coo_with_edge_ptr",
             rssi_model="incoherent_path_power_sum",
-            rt_reciprocity="sensors_tx_jammer_rx",
+            rt_reciprocity="jammer_tx_sensors_rx" if cfg.n_sensors > cfg.n_steps else "sensors_tx_jammer_rx",
             mitsuba_variant=mi.variant(),
             sionna_rt_version=getattr(rt, "__version__", "unknown"),
         )
