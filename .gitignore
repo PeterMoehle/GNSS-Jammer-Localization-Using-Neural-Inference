@@ -1,3 +1,9 @@
+network_jamming
+**/data/*
+
+sionna_command.txt
+
+gnn-jamming-source-localization/results/
 # Python
 __pycache__/
 *.py[cod]
@@ -45,5 +51,5 @@ externals/tools
 .DS_Store
 
 # LOCAL
-notes.txt
 /_LOCAL/
+new_model_architecture/checkpoints
