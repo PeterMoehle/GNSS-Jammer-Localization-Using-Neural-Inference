@@ -26,6 +26,12 @@ Note: For data creation using google colab:
 - Angles that have been used in baseline paper: $[\sin\theta, \cos\theta, \sin\phi, \cos\phi]$
 - Improve pipeline - using OSM-To-Sionna and street information as walkable area --> scripts_data
 
+
+Later: 
+- varying jammer power, 
+- Whatever this is: Because antennas are isotropic (pattern="iso"), swap TX and RX in PathSolver: place the $N$ stationary sensors as TX and all $T$ trajectory points (plus extra candidate points) as RX in a single PathSolver call per episode. This cuts ray-tracing calls by ~4–8× and lets you reuse one RT pass across multiple sampled sensor layouts.
+- Data should be stored as one big file, including the dataconfig
+
 ---
 
 ## generate_data: Creates data for a single scene. With changing sensor positions. Storing it as HDF5
@@ -119,8 +125,9 @@ Regenerate OSM Prep and Scenebaking (but osm only).
 Reason: We excluded highway information (streets...), but we need them.
 
 Solution:
-- Remove Cached prepared osm: rm -rf workspace_inputs/osm/prepared/germany
+- Remove Cached prepared osm if exist: rm -rf workspace_inputs/osm/prepared/germany
 - Download the raw data via uv run sripts_data/01_sync_externals.py --> Comment out line 37 and 38, so it will download germany and lithuania
 - Reexecute osm preperation: uv run sripts_data/02_prepare_osm_batched.py
 - Reexecute scene baking !!! but with flag for osm only... uv run scripts/bake_scenes.py --osm-only
+- Reexecute scene baking !!! but with flag for precomputing walkable area only... uv run scripts/bake_scenes.py --walkable-only
 - Verification: grep -E 'k="(highway|railway)"' workspace_inputs/baked_scenes/<your_city_name>/osm/map.osm | head -n 10

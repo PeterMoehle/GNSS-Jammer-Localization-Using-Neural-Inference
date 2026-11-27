@@ -6,10 +6,13 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
+import drjit as dr
+import mitsuba as mi
 import numpy as np
+from sionna.rt import load_scene
 
 # --------------------------------------------------
 # 1. Paths & Imports
@@ -51,6 +54,7 @@ class SceneSpec:
 
 CONFIG_PATH = INPUT_DIR / "scene_configs.json"
 
+
 def load_scene_specs() -> list[SceneSpec]:
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(
@@ -58,6 +62,7 @@ def load_scene_specs() -> list[SceneSpec]:
         )
     raw = json.loads(CONFIG_PATH.read_text())
     return [SceneSpec(**item) for item in raw.get("scenes", [])]
+
 
 SCENES_TO_BAKE: list[SceneSpec] = load_scene_specs()
 print(SCENES_TO_BAKE)
@@ -74,12 +79,6 @@ def compute_terrain_grid_size(
     min_grid: int = 128,
     max_grid: int = 1200,
 ) -> int:
-    """
-    Computes terrain mesh vertex grid size so that:
-      - Even the smallest subregion (e.g. 50 m) has >= 5 terrain vertices across.
-      - Global vertex spacing stays around ~10 m (3x finer than ~30 m SRTM data),
-        capped at max_grid to keep Mitsuba BVH build & memory fast.
-    """
     effective_spacing = min(target_spacing_m, min_subregion_m / 5.0)
     grid_size = int(math.ceil(total_span_m / effective_spacing))
     return max(min_grid, min(max_grid, grid_size))
@@ -172,7 +171,6 @@ def find_generated_xml(scene_dir: Path) -> Path:
     xml_files = sorted(scene_dir.glob("*.xml"))
     if not xml_files:
         raise FileNotFoundError(f"SceneBaker did not produce an .xml file in {scene_dir}")
-    # Prefer scene.xml if multiple exist
     for f in xml_files:
         if f.name == "scene.xml":
             return f
@@ -180,12 +178,135 @@ def find_generated_xml(scene_dir: Path) -> Path:
 
 
 # --------------------------------------------------
-# 4. Bake Single Scene
+# 4. Precompute & Store Walkable Map
+# --------------------------------------------------
+
+def _classify_scene_shapes(rt_scene) -> tuple[list, list, list]:
+    """Classify merged Mitsuba shapes into street, park, and obstacle (building/roof/water) shapes."""
+    street_shapes = []
+    park_shapes = []
+    obstacle_shapes = []
+    ground_shapes = []
+
+    street_tokens = ("road", "path", "pedestrian", "steps", "cycleway", "footway")
+    obstacle_tokens = ("building", "roof", "wall", "water")
+
+    for shape in rt_scene.mi_scene.shapes():
+        shape_id = (shape.id() or "").lower()
+        bsdf = shape.bsdf()
+        bsdf_id = (bsdf.id() if bsdf is not None and bsdf.id() else "").lower()
+        tag = f"{shape_id} {bsdf_id}"
+
+        if any(tok in tag for tok in obstacle_tokens):
+            obstacle_shapes.append(shape)
+        elif any(tok in tag for tok in street_tokens):
+            street_shapes.append(shape)
+        elif "park" in tag:
+            park_shapes.append(shape)
+        elif "ground" in tag or "plane" in tag:
+            ground_shapes.append(shape)
+
+    if not street_shapes and not park_shapes and ground_shapes:
+        street_shapes = ground_shapes
+
+    return street_shapes, park_shapes, obstacle_shapes
+
+
+def build_and_save_walkable_map(
+    scene_dir: Path,
+    xml_path: Path,
+    usable_half_range_m: float,
+    resolution_m: float = 2.0,
+    ray_batch_size: int = 1_000_000,
+) -> Path:
+    """
+    Rasterizes the full non-buffer usable scene area at `resolution_m` (default 2.0 m)
+    by intersecting downward rays against the baked Mitsuba meshes, and saves:
+      - x_m, y_m: 1D coordinate axes
+      - height_m: float32 surface height (H, W)
+      - street: bool mask of roads/paths minus buildings/water (H, W)
+      - park: bool mask of parks minus buildings/water (H, W)
+      - resolution_m: float scalar
+    """
+    t0 = time.perf_counter()
+    rt_scene = load_scene(str(xml_path), merge_shapes=True)
+    bbox = rt_scene.mi_scene.bbox()
+    z_top = float(bbox.max.z) + 10.0
+
+    n = int(np.floor(2.0 * usable_half_range_m / resolution_m))
+    coords = -usable_half_range_m + (np.arange(n, dtype=np.float32) + 0.5) * resolution_m
+    xx, yy = np.meshgrid(coords, coords)
+    total_pts = xx.size
+
+    street_shapes, park_shapes, obstacle_shapes = _classify_scene_shapes(rt_scene)
+    street_ptrs = [mi.ShapePtr(s) for s in street_shapes]
+    park_ptrs = [mi.ShapePtr(s) for s in park_shapes]
+    obstacle_ptrs = [mi.ShapePtr(s) for s in obstacle_shapes]
+
+    height_flat = np.full(total_pts, np.nan, dtype=np.float32)
+    street_flat = np.zeros(total_pts, dtype=bool)
+    park_flat = np.zeros(total_pts, dtype=bool)
+
+    x_flat = xx.ravel()
+    y_flat = yy.ravel()
+
+    for start in range(0, total_pts, ray_batch_size):
+        end = min(start + ray_batch_size, total_pts)
+        chunk_len = end - start
+        origins = mi.Point3f(
+            x_flat[start:end],
+            y_flat[start:end],
+            np.full(chunk_len, z_top, dtype=np.float32),
+        )
+        hits = rt_scene.mi_scene.ray_intersect(mi.Ray3f(origins, mi.Vector3f(0, 0, -1)))
+        valid = np.asarray(hits.is_valid().numpy())
+        t_val = np.asarray(hits.t.numpy())
+        height_flat[start:end] = np.where(valid, z_top - t_val, np.nan)
+
+        is_street = np.zeros(chunk_len, dtype=bool)
+        for ptr in street_ptrs:
+            is_street |= np.asarray((hits.shape == ptr).numpy())
+
+        is_park = np.zeros(chunk_len, dtype=bool)
+        for ptr in park_ptrs:
+            is_park |= np.asarray((hits.shape == ptr).numpy())
+
+        is_obstacle = np.zeros(chunk_len, dtype=bool)
+        for ptr in obstacle_ptrs:
+            is_obstacle |= np.asarray((hits.shape == ptr).numpy())
+
+        street_flat[start:end] = valid & is_street & (~is_obstacle)
+        park_flat[start:end] = valid & is_park & (~is_obstacle)
+
+    out_file = scene_dir / "walkable_map.npz"
+    np.savez_compressed(
+        out_file,
+        x_m=coords,
+        y_m=coords,
+        height_m=height_flat.reshape(n, n),
+        street=street_flat.reshape(n, n),
+        park=park_flat.reshape(n, n),
+        resolution_m=np.float32(resolution_m),
+    )
+
+    del rt_scene
+    dr.sync_thread()
+    dr.flush_malloc_cache()
+    gc.collect()
+
+    print(
+        f"    Walkable map saved ({n}x{n} @ {resolution_m:g}m) "
+        f"in {time.perf_counter() - t0:.2f}s -> {out_file.name}"
+    )
+    return out_file
+
+
+# --------------------------------------------------
+# 5. Bake Single Scene
 # --------------------------------------------------
 
 def _spec_matches_meta(spec: SceneSpec, meta: dict) -> bool:
-    """Checks if an existing baked scene was generated with the exact same parameters."""
-    saved = meta.get("params", meta)  # backwards-compatible with flat meta
+    saved = meta.get("params", meta)
     return (
         saved.get("osm_region") == spec.osm_region
         and math.isclose(saved.get("lat", 0.0), spec.lat, abs_tol=1e-6)
@@ -195,18 +316,25 @@ def _spec_matches_meta(spec: SceneSpec, meta: dict) -> bool:
     )
 
 
-def bake_scene(spec: SceneSpec, overwrite: bool = False) -> Path:
+def bake_scene(spec: SceneSpec, overwrite: bool = False, walkable_res_m: float = 2.0) -> Path:
     scene_dir = BAKED_SCENES_DIR / spec.name
     meta_file = scene_dir / "scene_meta.json"
+    walkable_file = scene_dir / "walkable_map.npz"
 
     if meta_file.exists() and not overwrite:
         meta = json.loads(meta_file.read_text())
         xml_path = scene_dir / meta["xml_filename"]
         if xml_path.exists() and _spec_matches_meta(spec, meta):
-            print(
-                f"[✓] Skipping '{spec.name}' (already baked: "
-                f"region={spec.osm_region}, range={spec.range_m:g}m, buffer={spec.buffer_m:g}m)"
-            )
+            if not walkable_file.exists():
+                print(f"[+] Building missing walkable map for '{spec.name}'...")
+                build_and_save_walkable_map(
+                    scene_dir, xml_path, spec.range_m / 2.0, resolution_m=walkable_res_m
+                )
+            else:
+                print(
+                    f"[✓] Skipping '{spec.name}' (already baked: "
+                    f"region={spec.osm_region}, range={spec.range_m:g}m, buffer={spec.buffer_m:g}m)"
+                )
             return xml_path
         elif xml_path.exists():
             print(f"[!] Parameters changed for '{spec.name}' — re-baking scene...")
@@ -217,7 +345,6 @@ def bake_scene(spec: SceneSpec, overwrite: bool = False) -> Path:
 
     t0 = time.perf_counter()
 
-    # Usable inner bounds vs. full buffered bounds (used for OSM & terrain mesh)
     u_lat_min, u_lat_max, u_lon_min, u_lon_max = compute_bbox(
         spec.lat, spec.lon, spec.range_m, buffer_m=0.0
     )
@@ -263,10 +390,18 @@ def bake_scene(spec: SceneSpec, overwrite: bool = False) -> Path:
     del scene
     gc.collect()
 
-    # 3. Save structured metadata including exact generation params
+    # 3. Precompute and save 2.0 m walkable map
+    build_and_save_walkable_map(
+        scene_dir, xml_path, spec.range_m / 2.0, resolution_m=walkable_res_m
+    )
+    t_walk = time.perf_counter()
+
+    # 4. Save structured metadata including exact generation params
     metadata = {
         "name": spec.name,
         "xml_filename": xml_path.name,
+        "walkable_map_filename": "walkable_map.npz",
+        "walkable_resolution_m": walkable_res_m,
         "params": {
             "osm_region": spec.osm_region,
             "lat": spec.lat,
@@ -295,14 +430,15 @@ def bake_scene(spec: SceneSpec, overwrite: bool = False) -> Path:
         "timings_s": {
             "osm_extract": round(t_osm - t0, 2),
             "scenebaker_bake": round(t_bake - t_osm, 2),
-            "total": round(t_bake - t0, 2),
+            "walkable_map": round(t_walk - t_bake, 2),
+            "total": round(t_walk - t0, 2),
         },
     }
     meta_file.write_text(json.dumps(metadata, indent=2))
 
     print(
-        f"    Done in {t_bake - t0:.2f}s "
-        f"(OSM: {t_osm - t0:.2f}s, Bake: {t_bake - t_osm:.2f}s) -> {xml_path.name}"
+        f"    Done in {t_walk - t0:.2f}s "
+        f"(OSM: {t_osm - t0:.2f}s, Bake: {t_bake - t_osm:.2f}s, WalkMap: {t_walk - t_bake:.2f}s) -> {xml_path.name}"
     )
     return xml_path
 
@@ -311,21 +447,39 @@ def update_osm_only(spec: SceneSpec) -> Path:
     scene_dir = BAKED_SCENES_DIR / spec.name
     meta_file = scene_dir / "scene_meta.json"
     if not meta_file.exists():
-        raise FileNotFoundError(f"Szene '{spec.name}' wurde noch nicht gebacken.")
+        raise FileNotFoundError(f"Scene '{spec.name}' has not been baked yet.")
 
     lat_min, lat_max, lon_min, lon_max = compute_bbox(
         spec.lat, spec.lon, spec.range_m, spec.buffer_m
     )
     osm_file = scene_dir / "osm" / "map.osm"
-    
+
     t0 = time.perf_counter()
     extract_osm_bbox(lat_min, lat_max, lon_min, lon_max, spec.osm_region, osm_file)
-    print(f"[✓] OSM für '{spec.name}' in {time.perf_counter() - t0:.2f}s aktualisiert.")
+    print(f"[✓] OSM for '{spec.name}' updated in {time.perf_counter() - t0:.2f}s.")
     return osm_file
 
 
+def update_walkable_only(spec: SceneSpec, walkable_res_m: float = 2.0) -> Path:
+    scene_dir = BAKED_SCENES_DIR / spec.name
+    meta_file = scene_dir / "scene_meta.json"
+    if not meta_file.exists():
+        raise FileNotFoundError(f"Scene '{spec.name}' has not been baked yet.")
+
+    meta = json.loads(meta_file.read_text())
+    xml_path = scene_dir / meta["xml_filename"]
+    print(f"[+] Building walkable map for '{spec.name}'...")
+    out = build_and_save_walkable_map(
+        scene_dir, xml_path, spec.range_m / 2.0, resolution_m=walkable_res_m
+    )
+    meta["walkable_map_filename"] = out.name
+    meta["walkable_resolution_m"] = walkable_res_m
+    meta_file.write_text(json.dumps(meta, indent=2))
+    return out
+
+
 # --------------------------------------------------
-# 5. CLI Entrypoint
+# 6. CLI Entrypoint
 # --------------------------------------------------
 
 def main():
@@ -350,6 +504,18 @@ def main():
         default=False,
         help="Only re-extract map.osm for already baked scenes without re-baking 3D meshes.",
     )
+    parser.add_argument(
+        "--walkable-only",
+        action="store_true",
+        default=False,
+        help="Only build/update walkable_map.npz for already baked scenes.",
+    )
+    parser.add_argument(
+        "--walkable-res-m",
+        type=float,
+        default=2.0,
+        help="Grid resolution in meters for the precomputed walkable map (default: 2.0).",
+    )
     args = parser.parse_args()
 
     selected = SCENES_TO_BAKE
@@ -366,8 +532,10 @@ def main():
     for spec in selected:
         if args.osm_only:
             update_osm_only(spec)
+        elif args.walkable_only:
+            update_walkable_only(spec, walkable_res_m=args.walkable_res_m)
         else:
-            bake_scene(spec, overwrite=args.overwrite)
+            bake_scene(spec, overwrite=args.overwrite, walkable_res_m=args.walkable_res_m)
 
     print("\nAll requested scenes are baked and ready for Sionna RT.")
 
