@@ -10,6 +10,7 @@ import torch
 from torch import nn
 from torch.optim.lr_scheduler import OneCycleLR
 from torchinfo import summary
+from torch_geometric.utils import degree
 
 from new_model_architecture.data_preprocessing import load_dataloader_v1
 from new_model_architecture.model import GNN
@@ -49,7 +50,19 @@ train_dataloader, val_dataloader, test_dataloader = load_dataloader_v1(
 logger.info(f"num_batches: {len(train_dataloader)}")
 logger.info(f"num_val_batches: {len(val_dataloader)}")
 
-model = GNN()
+pna_degree_histogram = None
+if settings.MODEL_TYPE.upper() == "PNA":
+    sample_batch = next(iter(train_dataloader), None)
+    if sample_batch is None:
+        raise ValueError("Cannot initialize PNA with an empty training dataloader.")
+    in_degrees = degree(
+        sample_batch.edge_index[1],
+        num_nodes=sample_batch.num_nodes,
+        dtype=torch.long,
+    )
+    pna_degree_histogram = torch.bincount(in_degrees)
+
+model = GNN(deg=pna_degree_histogram)
 model = model.to(device)
 optimizer = torch.optim.AdamW(
     model.parameters(),
